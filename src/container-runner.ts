@@ -406,6 +406,9 @@ async function buildContainerArgs(
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
 ): Promise<string[]> {
+  console.error(
+    `[DEBUG] buildContainerArgs called, provider=${provider}, hasEnv=${!!providerContribution.env}, envKeys=${providerContribution.env ? Object.keys(providerContribution.env).join(',') : 'none'}`,
+  );
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
   // Environment — only vars read by code we don't own.
@@ -414,10 +417,16 @@ async function buildContainerArgs(
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
+    log.info('Provider env contribution', {
+      keys: Object.keys(providerContribution.env),
+      count: Object.keys(providerContribution.env).length,
+    });
     for (const [key, value] of Object.entries(providerContribution.env)) {
       args.push('-e', `${key}=${value}`);
     }
   }
+
+  log.info('Args before OneCLI', { envCount: args.filter((a) => a.startsWith('-e')).length });
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
   // are routed through the agent vault for credential injection. Treated as
@@ -431,7 +440,7 @@ async function buildContainerArgs(
   if (!onecliApplied) {
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
-  log.info('OneCLI gateway applied', { containerName });
+  log.info('OneCLI gateway applied', { containerName, envCount: args.filter((a) => a.startsWith('-e')).length });
 
   // Egress lockdown when enabled — throws if it can't be established, aborting
   // the spawn rather than running with open egress. Otherwise the host gateway.
