@@ -25,6 +25,7 @@ ARG VERCEL_VERSION=52.2.1
 ARG OPENCODE_VERSION=1.4.17
 ARG BUN_VERSION=1.3.12
 ARG CALENDAR_MCP_VERSION=2.6.1
+ARG BRAVE_SEARCH_MCP_VERSION=2.0.83
 
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
@@ -114,7 +115,9 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
         "opencode-ai@${OPENCODE_VERSION}"
 
 RUN --mount=type=cache,target=/root/.cache/pnpm \
-    pnpm install -g "@cocal/google-calendar-mcp@${CALENDAR_MCP_VERSION}"
+    pnpm install -g \
+        "@cocal/google-calendar-mcp@${CALENDAR_MCP_VERSION}" \
+        "@brave/brave-search-mcp-server@${BRAVE_SEARCH_MCP_VERSION}"
 
 # ---- ncl CLI wrapper ----------------------------------------------------------
 # Actual script lives in the mounted source at /app/src/cli/ncl.ts.
