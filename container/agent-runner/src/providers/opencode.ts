@@ -5,6 +5,7 @@ import { jsonSchema, streamText, tool } from 'ai';
 
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import { memoryReadTool, memoryWriteTool } from '../memory-tools.js';
 
 function log(msg: string): void {
   console.error(`[opencode-provider] ${msg}`);
@@ -124,6 +125,15 @@ export class OpenCodeProvider implements AgentProvider {
       this.messages.push({ role: 'system', content: systemInstructions });
       log(`System instructions added: ${systemInstructions.substring(0, 100)}...`);
     }
+    // Inject memory management prompt
+    this.messages.push({
+      role: 'system',
+      content:
+        'You have a persistent memory system powered by mnemon. At the start of each conversation, use memory_read to recall relevant past context. ' +
+        'When you learn something important about the user (preferences, facts, decisions, context), use memory_write to save it. ' +
+        'Memory is stored as a knowledge graph with deduplication and linking — just pass the insight, the system handles the rest. ' +
+        'Memory persists across sessions.',
+    });
     this.messages.push({ role: 'user', content: input.prompt });
     log(`User prompt added: ${input.prompt.substring(0, 100)}...`);
 
@@ -154,6 +164,10 @@ export class OpenCodeProvider implements AgentProvider {
           tools = await mcpRegistry.buildTools();
           log(`Loaded ${Object.keys(tools).length} MCP tools`);
         }
+        // Inject memory tools
+        tools['memory_read'] = memoryReadTool;
+        tools['memory_write'] = memoryWriteTool;
+        log('Memory tools injected');
 
         // Process the initial prompt immediately (it's already in messages)
         let firstTurn = true;
