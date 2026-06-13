@@ -432,9 +432,13 @@ async function processQuery(
     })();
   }, ACTIVE_POLL_INTERVAL_MS);
 
+  let lastError: { message: string; retryable: boolean } | null = null;
   try {
     for await (const event of query.events) {
       handleEvent(event, routing);
+      if (event.type === 'error') {
+        lastError = { message: event.message, retryable: event.retryable };
+      }
       touchHeartbeat();
 
       if (event.type === 'init') {
@@ -473,6 +477,10 @@ async function processQuery(
   } finally {
     done = true;
     clearInterval(pollHandle);
+  }
+
+  if (lastError) {
+    throw new Error(lastError.message);
   }
 
   return { continuation: queryContinuation };
