@@ -17,6 +17,7 @@ import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, st
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
 import { log } from './log.js';
+import { acquireHostLock, HostLockError, releaseHostLock } from './host-lock.js';
 import { enforceUpgradeTripwire } from './upgrade-state.js';
 
 // Response + shutdown registries live in response-registry.ts to break the
@@ -77,6 +78,21 @@ async function main(): Promise<void> {
   // 0.5 Upgrade tripwire — refuse to start if this install was updated
   // outside the sanctioned path (raw `git pull` instead of /update-nanoclaw).
   enforceUpgradeTripwire();
+
+  // 0.6 Single-host lock — parallel hosts each run delivery polls and race
+  // on the same outbound rows, producing duplicate channel messages.
+  try {
+    acquireHostLock();
+  } catch (err) {
+    if (err instanceof HostLockError) {
+      log.fatal('Refusing to start — another NanoClaw host is already running', {
+        pid: err.existingPid,
+        message: err.message,
+      });
+      process.exit(1);
+    }
+    throw err;
+  }
 
   // 1. Init central DB
   const dbPath = path.join(DATA_DIR, 'v2.db');
@@ -194,6 +210,7 @@ async function shutdown(signal: string): Promise<void> {
     // via SIGTERM/SIGINT, not a crash, so the next start shouldn't be counted
     // as one.
     resetCircuitBreaker();
+    releaseHostLock();
     process.exit(0);
   }
 }
@@ -203,5 +220,6 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 main().catch((err) => {
   log.fatal('Startup failed', { err });
+  releaseHostLock();
   process.exit(1);
 });
