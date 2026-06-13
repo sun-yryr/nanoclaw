@@ -37,7 +37,8 @@ export const memoryReadTool = tool({
     },
     required: ['query'],
   }),
-  execute: async ({ query }) => {
+  execute: async (args: any) => {
+    const query = args.query as string;
     const result = runMnemon(['recall', query]);
     if (!result.success) {
       return `Memory recall failed: ${result.stderr || result.stdout}`;
@@ -64,7 +65,8 @@ export const memoryWriteTool = tool({
     },
     required: ['insight'],
   }),
-  execute: async ({ insight }) => {
+  execute: async (args: any) => {
+    const insight = args.insight as string;
     const result = runMnemon(['remember', insight]);
     if (!result.success) {
       return `Memory save failed: ${result.stderr || result.stdout}`;
