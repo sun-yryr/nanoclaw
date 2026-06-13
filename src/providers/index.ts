@@ -5,4 +5,5 @@
 //
 // Skills add a new provider by appending one import line below.
 
+import './cline.js';
 import './opencode.js';
