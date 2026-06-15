@@ -4,7 +4,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { jsonSchema, streamText, tool } from 'ai';
 
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput, UserContentPart } from './types.js';
 import { memoryReadTool, memoryWriteTool } from '../memory-tools.js';
 
 function log(msg: string): void {
@@ -73,7 +73,7 @@ class McpToolRegistry {
 
 export class OpenCodeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
-  private messages: Array<{ role: string; content: string }> = [];
+  private messages: Array<{ role: string; content: string | UserContentPart[] }> = [];
   private mcpServers: Record<string, McpServerConfig>;
 
   constructor(options: ProviderOptions = {}) {
@@ -134,10 +134,13 @@ export class OpenCodeProvider implements AgentProvider {
         'Memory is stored as a knowledge graph with deduplication and linking — just pass the insight, the system handles the rest. ' +
         'Memory persists across sessions.',
     });
-    this.messages.push({ role: 'user', content: input.prompt });
+    this.messages.push({
+      role: 'user',
+      content: userMessageContent(input.prompt, input.userContent),
+    });
     log(`User prompt added: ${input.prompt.substring(0, 100)}...`);
 
-    const pending: string[] = [];
+    const pending: Array<{ text: string; userContent?: UserContentPart[] }> = [];
     let waiting: (() => void) | null = null;
     let ended = false;
     let aborted = false;
@@ -197,9 +200,12 @@ export class OpenCodeProvider implements AgentProvider {
               break;
             }
 
-            const userText = pending.shift()!;
-            self.messages.push({ role: 'user', content: userText });
-            log(`Processing follow-up: ${userText.substring(0, 100)}...`);
+            const followUp = pending.shift()!;
+            self.messages.push({
+              role: 'user',
+              content: userMessageContent(followUp.text, followUp.userContent),
+            });
+            log(`Processing follow-up: ${followUp.text.substring(0, 100)}...`);
           }
 
           firstTurn = false;
@@ -256,9 +262,9 @@ export class OpenCodeProvider implements AgentProvider {
     }
 
     return {
-      push: (message: string) => {
+      push: (message: string, userContent?: UserContentPart[]) => {
         log(`push() called: ${message.substring(0, 100)}...`);
-        pending.push(message);
+        pending.push({ text: message, userContent });
         kick();
       },
       end: () => {
@@ -278,3 +284,7 @@ export class OpenCodeProvider implements AgentProvider {
 }
 
 registerProvider('opencode', (opts) => new OpenCodeProvider(opts));
+
+function userMessageContent(prompt: string, userContent?: UserContentPart[]): string | UserContentPart[] {
+  return userContent && userContent.length > 0 ? userContent : prompt;
+}

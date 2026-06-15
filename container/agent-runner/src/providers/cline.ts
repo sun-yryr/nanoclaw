@@ -7,7 +7,7 @@ import { spawnSync } from 'child_process';
 import { buildClineBuiltinTools } from './cline-builtin-tools.js';
 import { resolveComposedClaudeMd } from '../claude-md-resolve.js';
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput, UserContentPart } from './types.js';
 
 function log(msg: string): void {
   console.error(`[cline-provider] ${msg}`);
@@ -181,7 +181,7 @@ export class ClineProvider implements AgentProvider {
 
     log(`Creating Agent with baseUrl=${baseUrl}, modelId=${modelId}`);
 
-    const pending: string[] = [];
+    const pending: Array<{ text: string; userContent?: UserContentPart[] }> = [];
     let waiting: (() => void) | null = null;
     let ended = false;
     let aborted = false;
@@ -293,7 +293,13 @@ export class ClineProvider implements AgentProvider {
         // ── First turn ──
         let runDone = false;
         let runResult: Awaited<ReturnType<typeof agent.run>> | undefined;
-        const runPromise = agent.run(input.prompt).then((r: AgentRunResult) => {
+        const firstInput = toAgentInput(input.prompt, input.userContent);
+        if (input.userContent?.length) {
+          const clineParts = typeof firstInput === 'object' ? firstInput.content : [];
+          const imageCount = clineParts.filter((p) => p.type === 'image').length;
+          log(`Multimodal turn: ${input.userContent.length} part(s) → ${clineParts.length} Cline part(s), ${imageCount} image(s)`);
+        }
+        const runPromise = agent.run(firstInput).then((r: AgentRunResult) => {
           runDone = true;
           runResult = r;
           eventWaiting?.();
@@ -346,12 +352,12 @@ export class ClineProvider implements AgentProvider {
               break;
             }
 
-            const userText = pending.shift()!;
-            log(`Processing follow-up: ${userText.substring(0, 100)}...`);
+            const followUp = pending.shift()!;
+            log(`Processing follow-up: ${followUp.text.substring(0, 100)}...`);
 
             let continueDone = false;
             let continueResult: Awaited<ReturnType<typeof agent.continue>> | undefined;
-            const continuePromise = agent.continue(userText).then((r: AgentRunResult) => {
+            const continuePromise = agent.continue(toAgentInput(followUp.text, followUp.userContent)).then((r: AgentRunResult) => {
               continueDone = true;
               continueResult = r;
               eventWaiting?.();
@@ -395,9 +401,9 @@ export class ClineProvider implements AgentProvider {
     }
 
     return {
-      push: (message: string) => {
+      push: (message: string, userContent?: UserContentPart[]) => {
         log(`push() called: ${message.substring(0, 100)}...`);
-        pending.push(message);
+        pending.push({ text: message, userContent });
         kick();
       },
       end: () => {
@@ -416,3 +422,59 @@ export class ClineProvider implements AgentProvider {
 }
 
 registerProvider('cline', (opts) => new ClineProvider(opts));
+
+/** Cline Agent content parts — AI SDK shape (`image`, not OpenAI `image_url` / `data`). */
+type ClineUserContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; image: string; mediaType: string };
+
+function parseDataUrl(url: string): { mediaType: string; image: string } | null {
+  const match = url.match(/^data:([^;,]+);base64,(.+)$/);
+  if (!match?.[1] || !match[2]) return null;
+  return { mediaType: match[1], image: match[2] };
+}
+
+/** Map Kimi/OpenAI-style parts to the format Cline's Agent runtime understands. */
+export function toClineUserContent(userContent: UserContentPart[]): ClineUserContentPart[] {
+  const parts: ClineUserContentPart[] = [];
+
+  for (const part of userContent) {
+    if (part.type === 'text') {
+      if (part.text.trim()) parts.push({ type: 'text', text: part.text });
+      continue;
+    }
+
+    if (part.type === 'image_url') {
+      const parsed = parseDataUrl(part.image_url.url);
+      if (parsed) {
+        parts.push({ type: 'image', image: parsed.image, mediaType: parsed.mediaType });
+      } else {
+        log(`Skipping non-data image_url for Cline (${part.image_url.url.slice(0, 40)}…)`);
+      }
+      continue;
+    }
+
+    if (part.type === 'video_url') {
+      // Cline has no native video part; keep a caption so the turn is not silent.
+      parts.push({
+        type: 'text',
+        text: `[User attached a video: ${part.video_url.url}]`,
+      });
+    }
+  }
+
+  return parts;
+}
+
+function toAgentInput(
+  prompt: string,
+  userContent?: UserContentPart[],
+): string | { role: 'user'; content: ClineUserContentPart[] } {
+  if (userContent && userContent.length > 0) {
+    const content = toClineUserContent(userContent);
+    if (content.length > 0) {
+      return { role: 'user', content };
+    }
+  }
+  return prompt;
+}

@@ -52,9 +52,20 @@ export interface ProviderOptions {
   effort?: string;
 }
 
+export type UserContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+  | { type: 'video_url'; video_url: { url: string } };
+
 export interface QueryInput {
   /** Initial prompt (already formatted by agent-runner). */
   prompt: string;
+
+  /**
+   * Kimi / OpenAI-compatible multimodal user content. When set, providers
+   * send this array as message.content instead of the plain prompt string.
+   */
+  userContent?: UserContentPart[];
 
   /**
    * Opaque continuation token from a previous query. The provider decides
@@ -82,7 +93,7 @@ export interface McpServerConfig {
 
 export interface AgentQuery {
   /** Push a follow-up message into the active query. */
-  push(message: string): void;
+  push(message: string, userContent?: UserContentPart[]): void;
 
   /** Signal that no more input will be sent. */
   end(): void;

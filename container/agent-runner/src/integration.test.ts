@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
@@ -371,6 +374,39 @@ describe('poll loop — stale session recovery', () => {
     // Continuation was cleared (isSessionInvalid returned true)
     expect(getContinuation('mock')).toBeUndefined();
 
+    await loopPromise.catch(() => {});
+  });
+
+  it('passes multimodal userContent to the provider for inbox attachments', async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'nc-int-media-'));
+    process.env.NANOCLAW_WORKSPACE = workspace;
+    const inboxDir = path.join(workspace, 'inbox', 'm-media');
+    fs.mkdirSync(inboxDir, { recursive: true });
+    fs.writeFileSync(path.join(inboxDir, 'photo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    insertMessage(
+      'm-media',
+      {
+        sender: 'Alice',
+        text: 'look at this',
+        attachments: [{ name: 'photo.png', type: 'image', localPath: 'inbox/m-media/photo.png' }],
+      },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-1' },
+    );
+
+    const provider = new MockProvider({}, () => '<message to="discord-test">seen</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => provider.lastUserContent !== undefined, 2000);
+    controller.abort();
+
+    expect(provider.lastUserContent?.some((p) => p.type === 'image_url')).toBe(true);
+    expect(provider.lastUserContent?.some((p) => p.type === 'text' && p.text.includes('look at this'))).toBe(true);
+    expect(provider.lastUserContent?.some((p) => p.type === 'text' && p.text.includes('saved to'))).toBe(false);
+
+    delete process.env.NANOCLAW_WORKSPACE;
+    fs.rmSync(workspace, { recursive: true, force: true });
     await loopPromise.catch(() => {});
   });
 });

@@ -143,12 +143,21 @@ export function setChannelRequestGate(fn: ChannelRequestGateFn): void {
   channelRequestGate = fn;
 }
 
-function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string } {
+function safeParseContent(raw: string): {
+  text?: string;
+  sender?: string;
+  senderId?: string;
+  attachments?: unknown[];
+} {
   try {
     return JSON.parse(raw);
   } catch {
     return { text: raw };
   }
+}
+
+function contentHasAttachments(parsed: { attachments?: unknown[] }): boolean {
+  return Array.isArray(parsed.attachments) && parsed.attachments.length > 0;
 }
 
 /**
@@ -280,6 +289,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   //    avoids the extra await).
   const parsed = safeParseContent(event.message.content);
   const messageText = parsed.text ?? '';
+  const hasAttachments = contentHasAttachments(parsed);
 
   let engagedCount = 0;
   let accumulatedCount = 0;
@@ -289,7 +299,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const agentGroup = getAgentGroup(agent.agent_group_id);
     if (!agentGroup) continue;
 
-    const engages = evaluateEngage(agent, messageText, isMention, mg, event.threadId);
+    const engages = evaluateEngage(agent, messageText, isMention, mg, event.threadId, hasAttachments);
 
     const accessOk = engages && (!accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed);
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
@@ -378,11 +388,13 @@ function evaluateEngage(
   isMention: boolean,
   mg: MessagingGroup,
   threadId: string | null,
+  hasAttachments = false,
 ): boolean {
   switch (agent.engage_mode) {
     case 'pattern': {
       const pat = agent.engage_pattern ?? '.';
       if (pat === '.') return true;
+      if (hasAttachments && !text.trim()) return true;
       try {
         return new RegExp(pat).test(text);
       } catch {
@@ -391,7 +403,7 @@ function evaluateEngage(
       }
     }
     case 'mention':
-      return isMention;
+      return isMention || hasAttachments;
     case 'mention-sticky': {
       if (isMention) return true;
       // Sticky follow-up: session already exists for this (agent, mg, thread)

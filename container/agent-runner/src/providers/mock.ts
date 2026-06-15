@@ -1,5 +1,5 @@
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput, UserContentPart } from './types.js';
 
 /**
  * Mock provider for testing. Returns canned responses.
@@ -9,6 +9,7 @@ export class MockProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
 
   private responseFactory: (prompt: string) => string;
+  lastUserContent?: UserContentPart[];
 
   constructor(_options: ProviderOptions = {}, responseFactory?: (prompt: string) => string) {
     this.responseFactory = responseFactory ?? ((prompt) => `Mock response to: ${prompt.slice(0, 100)}`);
@@ -19,7 +20,8 @@ export class MockProvider implements AgentProvider {
   }
 
   query(input: QueryInput): AgentQuery {
-    const pending: string[] = [];
+    this.lastUserContent = input.userContent;
+    const pending: Array<{ text: string; userContent?: UserContentPart[] }> = [];
     let waiting: (() => void) | null = null;
     let ended = false;
     let aborted = false;
@@ -38,7 +40,7 @@ export class MockProvider implements AgentProvider {
         while (!ended && !aborted) {
           if (pending.length > 0) {
             const msg = pending.shift()!;
-            yield { type: 'result', text: responseFactory(msg) };
+            yield { type: 'result', text: responseFactory(msg.text) };
             continue;
           }
           // Wait for push() or end()
@@ -51,14 +53,14 @@ export class MockProvider implements AgentProvider {
         // Drain remaining
         while (pending.length > 0) {
           const msg = pending.shift()!;
-          yield { type: 'result', text: responseFactory(msg) };
+          yield { type: 'result', text: responseFactory(msg.text) };
         }
       },
     };
 
     return {
-      push(message: string) {
-        pending.push(message);
+      push(message: string, userContent?: UserContentPart[]) {
+        pending.push({ text: message, userContent });
         waiting?.();
       },
       end() {

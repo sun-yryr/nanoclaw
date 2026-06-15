@@ -19,6 +19,7 @@ import {
   type Message as ChatMessage,
 } from 'chat';
 import { log } from '../log.js';
+import { downloadAttachmentBase64 } from '../attachment-download.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { getAskQuestionRender } from '../db/sessions.js';
@@ -170,13 +171,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           width: (att as unknown as Record<string, unknown>).width,
           height: (att as unknown as Record<string, unknown>).height,
         };
-        if (att.fetchData) {
-          try {
-            const buffer = await att.fetchData();
-            entry.data = buffer.toString('base64');
-          } catch (err) {
-            log.warn('Failed to download attachment', { type: att.type, err });
-          }
+        if (typeof att.url === 'string' && att.url) {
+          entry.url = att.url;
+        }
+        const base64 = await downloadAttachmentBase64(att);
+        if (base64) {
+          entry.data = base64;
         }
         enriched.push(entry);
       }

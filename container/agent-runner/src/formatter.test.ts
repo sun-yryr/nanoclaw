@@ -163,6 +163,18 @@ describe('XML escaping', () => {
     expect(result).toContain('sender="A &amp; B &lt;Co&gt;"');
     expect(result).toContain('&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;');
   });
+  it('omits attachment path lines when omitAttachments is true', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'pic',
+      attachments: [{ name: 'photo.png', type: 'image', localPath: 'inbox/m1/photo.png' }],
+    });
+    const withPaths = formatMessages(getPendingMessages());
+    const withoutPaths = formatMessages(getPendingMessages(), { omitAttachments: true });
+    expect(withPaths).toContain('saved to');
+    expect(withoutPaths).not.toContain('saved to');
+    expect(withoutPaths).toContain('pic');
+  });
 });
 
 describe('stripInternalTags', () => {
