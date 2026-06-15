@@ -4,6 +4,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { spawnSync } from 'child_process';
 
+import { buildClineBuiltinTools } from './cline-builtin-tools.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -197,7 +198,14 @@ export class ClineProvider implements AgentProvider {
       log('gen() started');
       let mcpRegistry: McpToolRegistry | null = null;
       try {
-        let tools: any[] = [memoryReadTool, memoryWriteTool];
+        const builtinTools = buildClineBuiltinTools(input.cwd);
+        log(`Loaded ${builtinTools.length} Cline built-in tools: ${builtinTools.map((t) => t.name).join(', ')}`);
+
+        let tools: ReturnType<typeof createTool>[] = [
+          ...builtinTools,
+          memoryReadTool,
+          memoryWriteTool,
+        ];
         if (Object.keys(self.mcpServers).length > 0) {
           mcpRegistry = new McpToolRegistry();
           await mcpRegistry.init(self.mcpServers);
