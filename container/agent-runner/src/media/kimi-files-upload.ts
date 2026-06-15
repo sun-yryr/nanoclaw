@@ -1,8 +1,12 @@
 /**
- * Upload large video files to Moonshot Files API and return an ms:// reference.
- * Auth follows the same OneCLI proxy pattern as chat completions (placeholder
- * Bearer header rewritten on the wire).
+ * Upload video files to Moonshot Files API and return an ms:// reference.
+ *
+ * OpenCode Zen/Go gateways (opencode.ai/zen/...) proxy chat completions only —
+ * POST {base}/files returns 404. When the chat base URL is an OpenCode gateway,
+ * uploads go to Moonshot directly (MOONSHOT_API_BASE_URL or api.moonshot.ai/v1).
  */
+
+const DEFAULT_MOONSHOT_FILES_BASE = 'https://api.moonshot.ai/v1';
 
 function log(msg: string): void {
   console.error(`[kimi-files-upload] ${msg}`);
@@ -13,13 +17,32 @@ export interface UploadVideoResult {
   fileId: string;
 }
 
+/** Resolve the Moonshot /files base URL for video uploads. */
+export function resolveKimiFilesBaseUrl(chatBaseUrl?: string): string {
+  const configured = process.env.MOONSHOT_API_BASE_URL?.trim();
+  if (configured) return configured.replace(/\/$/, '');
+
+  const chat = (chatBaseUrl ?? process.env.ANTHROPIC_BASE_URL ?? '').replace(/\/$/, '');
+  if (chat && /opencode\.ai/i.test(chat)) {
+    log(`Chat base is OpenCode gateway (${chat}); using Moonshot Files API at ${DEFAULT_MOONSHOT_FILES_BASE}`);
+    return DEFAULT_MOONSHOT_FILES_BASE;
+  }
+
+  if (chat) return chat;
+  return DEFAULT_MOONSHOT_FILES_BASE;
+}
+
+function resolveKimiFilesApiKey(): string {
+  return process.env.MOONSHOT_API_KEY || process.env.OPENCODE_GO_API_KEY || 'placeholder';
+}
+
 export async function uploadVideoToKimi(
   data: Buffer,
   filename: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<UploadVideoResult> {
-  const baseUrl = (process.env.ANTHROPIC_BASE_URL || 'https://api.moonshot.ai/v1').replace(/\/$/, '');
-  const apiKey = process.env.OPENCODE_GO_API_KEY || 'placeholder';
+  const baseUrl = resolveKimiFilesBaseUrl();
+  const apiKey = resolveKimiFilesApiKey();
 
   const form = new FormData();
   form.append('purpose', 'video');

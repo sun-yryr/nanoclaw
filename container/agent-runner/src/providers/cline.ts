@@ -297,7 +297,11 @@ export class ClineProvider implements AgentProvider {
         if (input.userContent?.length) {
           const clineParts = typeof firstInput === 'object' ? firstInput.content : [];
           const imageCount = clineParts.filter((p) => p.type === 'image').length;
-          log(`Multimodal turn: ${input.userContent.length} part(s) → ${clineParts.length} Cline part(s), ${imageCount} image(s)`);
+          const videoCount = clineParts.filter((p) => p.type === 'video_url').length;
+          log(
+            `Multimodal turn: ${input.userContent.length} part(s) → ${clineParts.length} Cline part(s), ` +
+              `${imageCount} image(s), ${videoCount} video(s)`,
+          );
         }
         const runPromise = agent.run(firstInput).then((r: AgentRunResult) => {
           runDone = true;
@@ -426,12 +430,21 @@ registerProvider('cline', (opts) => new ClineProvider(opts));
 /** Cline Agent content parts — AI SDK shape (`image`, not OpenAI `image_url` / `data`). */
 type ClineUserContentPart =
   | { type: 'text'; text: string }
-  | { type: 'image'; image: string; mediaType: string };
+  | { type: 'image'; image: string; mediaType: string }
+  | { type: 'video_url'; video_url: { url: string } };
 
 function parseDataUrl(url: string): { mediaType: string; image: string } | null {
   const match = url.match(/^data:([^;,]+);base64,(.+)$/);
   if (!match?.[1] || !match[2]) return null;
   return { mediaType: match[1], image: match[2] };
+}
+
+function summarizeMediaUrl(url: string): string {
+  if (url.startsWith('data:')) {
+    const semi = url.indexOf(';');
+    return semi >= 0 ? `${url.slice(0, semi)};base64,…` : 'data:…';
+  }
+  return url.length > 120 ? `${url.slice(0, 120)}…` : url;
 }
 
 /** Map Kimi/OpenAI-style parts to the format Cline's Agent runtime understands. */
@@ -449,17 +462,13 @@ export function toClineUserContent(userContent: UserContentPart[]): ClineUserCon
       if (parsed) {
         parts.push({ type: 'image', image: parsed.image, mediaType: parsed.mediaType });
       } else {
-        log(`Skipping non-data image_url for Cline (${part.image_url.url.slice(0, 40)}…)`);
+        log(`Skipping non-data image_url for Cline (${summarizeMediaUrl(part.image_url.url)})`);
       }
       continue;
     }
 
     if (part.type === 'video_url') {
-      // Cline has no native video part; keep a caption so the turn is not silent.
-      parts.push({
-        type: 'text',
-        text: `[User attached a video: ${part.video_url.url}]`,
-      });
+      parts.push({ type: 'video_url', video_url: { url: part.video_url.url } });
     }
   }
 

@@ -25,13 +25,27 @@ describe('toClineUserContent', () => {
     expect(toClineUserContent(input)).toEqual([{ type: 'text', text: 'hello' }]);
   });
 
-  it('maps video_url to a text placeholder', () => {
+  it('passes ms:// video_url through to Cline', () => {
     const input: UserContentPart[] = [
-      { type: 'video_url', video_url: { url: 'https://files.example.com/v.mp4' } },
+      { type: 'video_url', video_url: { url: 'ms://file-abc' } },
+      { type: 'text', text: 'describe the clip' },
     ];
 
     expect(toClineUserContent(input)).toEqual([
-      { type: 'text', text: '[User attached a video: https://files.example.com/v.mp4]' },
+      { type: 'video_url', video_url: { url: 'ms://file-abc' } },
+      { type: 'text', text: 'describe the clip' },
+    ]);
+  });
+
+  it('passes inline data: video_url through to Cline', () => {
+    const input: UserContentPart[] = [
+      { type: 'video_url', video_url: { url: 'data:video/mp4;base64,abc123' } },
+      { type: 'text', text: 'hello' },
+    ];
+
+    expect(toClineUserContent(input)).toEqual([
+      { type: 'video_url', video_url: { url: 'data:video/mp4;base64,abc123' } },
+      { type: 'text', text: 'hello' },
     ]);
   });
 });

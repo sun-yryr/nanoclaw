@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { buildKimiContentParts, VIDEO_INLINE_MAX_BYTES } from './build-kimi-content.js';
+import { buildKimiContentParts } from './build-kimi-content.js';
 import { classifyAttachment, mimeForKind } from './classify.js';
 import { resolveAttachmentsFromMessages } from './resolve-attachments.js';
 import type { MessageInRow } from '../db/messages-in.js';
@@ -65,18 +65,39 @@ describe('buildKimiContentParts', () => {
     expect(parts[1]).toEqual({ type: 'text', text: '<message>hi</message>' });
   });
 
-  it('inlines small videos as base64 video_url', async () => {
+  it('falls back to inline video_url when Files API upload fails for small clips', async () => {
     const data = Buffer.from('fake-video');
+    const mockFetch = async () => new Response('not found', { status: 404 });
+
     const parts = await buildKimiContentParts(
       [{ name: 'clip.mp4', kind: 'video', mimeType: 'video/mp4', data }],
       'check this',
+      mockFetch as typeof fetch,
     );
     expect(parts[0].type).toBe('video_url');
     expect(parts[0].video_url?.url).toStartWith('data:video/mp4;base64,');
   });
 
+  it('uploads videos via Files API when available', async () => {
+    const data = Buffer.from('fake-video');
+    const mockFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/files') && init?.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'file-small' }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    };
+
+    const parts = await buildKimiContentParts(
+      [{ name: 'clip.mp4', kind: 'video', mimeType: 'video/mp4', data }],
+      'check this',
+      mockFetch as typeof fetch,
+    );
+    expect(parts[0].video_url?.url).toBe('ms://file-small');
+  });
+
   it('uploads large videos via Files API', async () => {
-    const data = Buffer.alloc(VIDEO_INLINE_MAX_BYTES + 1, 1);
+    const data = Buffer.alloc(11 * 1024 * 1024, 1);
     const mockFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith('/files') && init?.method === 'POST') {
@@ -91,6 +112,19 @@ describe('buildKimiContentParts', () => {
       mockFetch as typeof fetch,
     );
     expect(parts[0].video_url?.url).toBe('ms://file-abc');
+  });
+
+  it('omits video when upload fails and clip exceeds inline fallback limit', async () => {
+    const data = Buffer.alloc(3 * 1024 * 1024, 1);
+    const mockFetch = async () => new Response('not found', { status: 404 });
+
+    const parts = await buildKimiContentParts(
+      [{ name: 'big.mp4', kind: 'video', mimeType: 'video/mp4', data }],
+      'describe',
+      mockFetch as typeof fetch,
+    );
+    expect(parts.some((p) => p.type === 'video_url')).toBe(false);
+    expect(parts.some((p) => p.type === 'text')).toBe(true);
   });
 });
 
