@@ -5,6 +5,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { spawnSync } from 'child_process';
 
 import { buildClineBuiltinTools } from './cline-builtin-tools.js';
+import { resolveComposedClaudeMd } from '../claude-md-resolve.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -214,12 +215,18 @@ export class ClineProvider implements AgentProvider {
           log(`Loaded ${mcpTools.length} MCP tools`);
         }
 
+        const claudeMd = resolveComposedClaudeMd(input.cwd);
+        const systemPrompt = [input.systemContext?.instructions, claudeMd].filter(Boolean).join('\n\n');
+        if (claudeMd) {
+          log(`Resolved CLAUDE.md instructions (${claudeMd.length} chars)`);
+        }
+
         const agent = new Agent({
           providerId: 'openai-compatible',
           modelId,
           apiKey,
           baseUrl,
-          systemPrompt: input.systemContext?.instructions,
+          systemPrompt: systemPrompt || undefined,
           tools,
           maxIterations: 10,
         });
