@@ -174,6 +174,8 @@ async function main(): Promise<void> {
   // offline adapter is never rerouted through a sibling bot. See
   // createChannelDeliveryAdapter in channels/channel-registry.ts.
   setDeliveryAdapter(createChannelDeliveryAdapter());
+  const { startDiscordVoice } = await import('./modules/discord-voice/index.js');
+  await startDiscordVoice();
 
   // 5. Start delivery polls
   startActiveDeliveryPoll();
