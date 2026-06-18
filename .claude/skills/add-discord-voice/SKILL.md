@@ -27,6 +27,9 @@ The implementation is checked into the main source tree:
 `src/index.ts` starts the module after the delivery adapter is installed. The module no-ops
 unless `DISCORD_VOICE_ENABLED=true`.
 
+`!nc voice ...` commands are consumed by the host command gate, so the Discord text-channel
+adapter does not pass join/leave/status commands through to the agent as normal chat.
+
 ## Prerequisites
 
 1. Apply `/add-discord` first. This skill reuses `DISCORD_BOT_TOKEN`.
@@ -102,6 +105,8 @@ systemctl --user restart $(systemd_unit)              # Linux
    ```text
    !nc voice join
    ```
+
+   The host handles this command directly; the agent will not answer the command text.
 
 3. Talk naturally. The bot transcribes completed speech segments, but only wakes the agent
    when one of these is true:
