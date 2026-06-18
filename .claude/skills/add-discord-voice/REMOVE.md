@@ -25,7 +25,7 @@ OPENAI_API_KEY
 
 Only remove `OPENAI_API_KEY` if no other local customization uses it.
 
-## 2. Remove copied files
+## 2. Remove source files
 
 ```bash
 rm -rf src/modules/discord-voice

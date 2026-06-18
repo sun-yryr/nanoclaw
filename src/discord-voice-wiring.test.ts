@@ -2,7 +2,7 @@
  * Wiring test for the Discord voice host startup integration point.
  *
  * The voice module is env-gated, so importing it directly would not prove the host starts it.
- * This structural test asserts `main()` dynamically imports the skill module and awaits
+ * This structural test asserts `main()` dynamically imports the module and awaits
  * `startDiscordVoice()` immediately after the delivery adapter is installed.
  */
 import fs from 'fs';

@@ -3,23 +3,31 @@ name: add-discord-voice
 description: Add Discord voice-channel participation with OpenAI STT/TTS and selective spoken replies.
 ---
 
-# Add Discord Voice
+# Discord Voice
 
-Adds a Discord voice companion on top of `/add-discord`. The bot can join a voice
-channel, transcribe speech with OpenAI, route selected utterances through the normal
-NanoClaw session pipeline, and speak the agent's reply back into the same voice channel.
+This repository includes a Discord voice companion on top of `/add-discord`. The bot can
+join a voice channel, transcribe speech with OpenAI, route selected utterances through
+the normal NanoClaw session pipeline, and speak the agent's reply back into the same
+voice channel.
 
 The voice loop is intentionally selective: explicit requests wake the agent, optional AI
 judging can decide when a reply would be useful, and a low probability fallback keeps the
 assistant from answering every human utterance.
 
-## Phase 1: Pre-flight
+## Implementation
 
-### Check if already applied
+The implementation is checked into the main source tree:
 
-If `src/modules/discord-voice/index.ts` exists, skip to Phase 3.
+- `src/modules/discord-voice/index.ts` — Discord voice connection, capture, routing, TTS playback.
+- `src/modules/discord-voice/openai.ts` — OpenAI STT/TTS and response-judge API calls.
+- `src/modules/discord-voice/decision.ts` — explicit-request, AI-judge, and probability response gate.
+- `src/modules/discord-voice/decision.test.ts` — response-gate tests.
+- `src/discord-voice-wiring.test.ts` — startup wiring guard.
 
-### Prerequisites
+`src/index.ts` starts the module after the delivery adapter is installed. The module no-ops
+unless `DISCORD_VOICE_ENABLED=true`.
+
+## Prerequisites
 
 1. Apply `/add-discord` first. This skill reuses `DISCORD_BOT_TOKEN`.
 2. Install `ffmpeg` on the host. The voice module uses it indirectly through
@@ -34,48 +42,7 @@ If `src/modules/discord-voice/index.ts` exists, skip to Phase 3.
    - Speak
    - Use Voice Activity
 
-## Phase 2: Apply Code Changes
-
-### Install dependencies
-
-```bash
-pnpm install discord.js@14.26.4 @discordjs/voice@0.19.2 prism-media@1.3.5 opusscript@0.1.1
-```
-
-These are host-side dependencies only. The agent container does not need Discord voice
-packages because live voice connections stay in the host process.
-
-### Copy the skill files
-
-```bash
-S=.claude/skills/add-discord-voice
-mkdir -p src/modules/discord-voice
-cp $S/decision.ts src/modules/discord-voice/decision.ts
-cp $S/openai.ts src/modules/discord-voice/openai.ts
-cp $S/index.ts src/modules/discord-voice/index.ts
-cp $S/decision.test.ts src/modules/discord-voice/decision.test.ts
-cp $S/discord-voice-wiring.test.ts src/discord-voice-wiring.test.ts
-```
-
-### Wire the host startup
-
-Edit `src/index.ts`. Just after the delivery adapter is set:
-
-```ts
-setDeliveryAdapter(createChannelDeliveryAdapter());
-```
-
-add the voice startup block:
-
-```ts
-const { startDiscordVoice } = await import('./modules/discord-voice/index.js');
-await startDiscordVoice();
-```
-
-`startDiscordVoice()` no-ops unless `DISCORD_VOICE_ENABLED=true`, so the startup edit is
-safe for installs that keep voice disabled.
-
-### Validate
+## Validate
 
 ```bash
 pnpm run build
@@ -85,7 +52,7 @@ pnpm exec vitest run src/modules/discord-voice/decision.test.ts src/discord-voic
 The build guards the Discord voice dependencies and typed core imports. The wiring test
 goes red if the startup block is removed or moved away from the delivery adapter setup.
 
-## Phase 3: Configure
+## Configure
 
 Add the required values to `.env`:
 
@@ -127,7 +94,7 @@ systemctl --user restart $(systemd_unit)              # Linux
 # launchctl kickstart -k gui/$(id -u)/$(launchd_label) # macOS
 ```
 
-## Phase 4: Use
+## Use
 
 1. Join a Discord voice channel.
 2. In the related text channel, send:
