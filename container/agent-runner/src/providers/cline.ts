@@ -228,7 +228,7 @@ export class ClineProvider implements AgentProvider {
           baseUrl,
           systemPrompt: systemPrompt || undefined,
           tools,
-          maxIterations: 10,
+          maxIterations: 50,
         });
 
         // Restore previous conversation if continuation is provided
