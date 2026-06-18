@@ -35,11 +35,15 @@ interface DiscordVoiceConfig {
   responseProbability: number;
   aiJudge: boolean;
   routeUnanswered: boolean;
+  postTranscripts: boolean;
   silenceMs: number;
   minAudioMs: number;
   pendingReplyTtlMs: number;
   openai: OpenAIAudioConfig;
 }
+
+/** Marks bot-posted STT lines so speakPendingReply ignores them. */
+const VOICE_TRANSCRIPT_MARKER = '\uFEFF';
 
 interface VoiceSession {
   guildId: string;
@@ -123,7 +127,9 @@ class DiscordVoiceController {
     if (!message.guild) return;
 
     if (message.author.id === this.client.user?.id) {
-      await this.speakPendingReply(message);
+      if (!isVoiceTranscriptChannelMessage(message.content)) {
+        await this.speakPendingReply(message);
+      }
       return;
     }
 
@@ -273,6 +279,12 @@ class DiscordVoiceController {
         reason: decision.reason,
       });
 
+      if (this.config.postTranscripts) {
+        await this.postTranscriptToChannel(session, speakerName, transcript).catch((err) =>
+          log.warn('[discord-voice] failed to post transcript', { guildId: session.guildId, err }),
+        );
+      }
+
       if (!decision.respond && !this.config.routeUnanswered) return;
       if (decision.respond) {
         this.pendingReplies.set(replyKey(session.guildId, session.textChannelId), {
@@ -308,6 +320,15 @@ class DiscordVoiceController {
     } finally {
       session.capturing.delete(userId);
     }
+  }
+
+  private async postTranscriptToChannel(session: VoiceSession, speakerName: string, transcript: string): Promise<void> {
+    const channel = await this.client.channels.fetch(session.textChannelId);
+    if (!channel?.isTextBased() || !('send' in channel) || typeof channel.send !== 'function') {
+      throw new Error(`text channel ${session.textChannelId} is not sendable`);
+    }
+
+    await channel.send(formatTranscriptChannelMessage(speakerName, transcript));
   }
 
   private async speakPendingReply(message: Message): Promise<void> {
@@ -373,6 +394,7 @@ function loadConfig(): DiscordVoiceConfig {
     'DISCORD_VOICE_RESPONSE_PROBABILITY',
     'DISCORD_VOICE_AI_JUDGE',
     'DISCORD_VOICE_ROUTE_UNANSWERED',
+    'DISCORD_VOICE_POST_TRANSCRIPTS',
     'DISCORD_VOICE_SILENCE_MS',
     'DISCORD_VOICE_MIN_AUDIO_MS',
     'DISCORD_VOICE_PENDING_REPLY_TTL_MS',
@@ -392,6 +414,7 @@ function loadConfig(): DiscordVoiceConfig {
     responseProbability: parseProbability(get('DISCORD_VOICE_RESPONSE_PROBABILITY', '0.15')),
     aiJudge: parseBoolean(get('DISCORD_VOICE_AI_JUDGE'), false),
     routeUnanswered: parseBoolean(get('DISCORD_VOICE_ROUTE_UNANSWERED'), false),
+    postTranscripts: parseBoolean(get('DISCORD_VOICE_POST_TRANSCRIPTS'), false),
     silenceMs: parsePositiveInt(get('DISCORD_VOICE_SILENCE_MS'), 900),
     minAudioMs: parsePositiveInt(get('DISCORD_VOICE_MIN_AUDIO_MS'), 700),
     pendingReplyTtlMs: parsePositiveInt(get('DISCORD_VOICE_PENDING_REPLY_TTL_MS'), 120_000),
@@ -424,6 +447,14 @@ function parseProbability(value: string): number {
 
 function replyKey(guildId: string, textChannelId: string): string {
   return `${guildId}:${textChannelId}`;
+}
+
+export function formatTranscriptChannelMessage(speakerName: string, transcript: string): string {
+  return `${VOICE_TRANSCRIPT_MARKER}🎤 **${speakerName}**: ${transcript}`;
+}
+
+export function isVoiceTranscriptChannelMessage(content: string): boolean {
+  return content.startsWith(VOICE_TRANSCRIPT_MARKER);
 }
 
 function cleanForSpeech(text: string): string {
