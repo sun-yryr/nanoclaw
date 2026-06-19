@@ -24,19 +24,14 @@ afterEach(() => {
   closeSessionDb();
 });
 
-function insertMessage(
-  id: string,
-  kind: string,
-  content: object,
-  opts?: { timestamp?: string },
-) {
+function insertMessage(id: string, kind: string, content: object, opts?: { timestamp?: string; trigger?: 0 | 1 }) {
   const timestamp = opts?.timestamp ?? new Date().toISOString();
   getInboundDb()
     .prepare(
-      `INSERT INTO messages_in (id, kind, timestamp, status, content)
-       VALUES (?, ?, ?, 'pending', ?)`,
+      `INSERT INTO messages_in (id, kind, timestamp, status, trigger, content)
+       VALUES (?, ?, ?, 'pending', ?, ?)`,
     )
-    .run(id, kind, timestamp, JSON.stringify(content));
+    .run(id, kind, timestamp, opts?.trigger ?? 1, JSON.stringify(content));
 }
 
 describe('context timezone header', () => {
@@ -59,6 +54,91 @@ describe('context timezone header', () => {
     const firstMsgIdx = result.indexOf('<message ');
     expect(ctxIdx).toBeGreaterThanOrEqual(0);
     expect(firstMsgIdx).toBeGreaterThan(ctxIdx);
+  });
+});
+
+describe('voice response instructions', () => {
+  it('adds voice-only response guidance for triggered voice messages', () => {
+    insertMessage('m1', 'chat-sdk', {
+      sender: 'Alice',
+      text: '[Voice transcript] NanoClaw, what should I say?',
+      interactionMode: 'voice',
+    });
+
+    const result = formatMessages(getPendingMessages());
+
+    expect(result).toContain(`<context timezone="${TIMEZONE}" interaction="voice"`);
+    expect(result).toContain('<voice_response_instructions>');
+    expect(result).toContain('spoken aloud with OpenAI TTS');
+  });
+
+  it('does not add voice guidance for normal text messages', () => {
+    insertMessage('m1', 'chat-sdk', {
+      sender: 'Alice',
+      text: 'NanoClaw, what should I say?',
+    });
+
+    const result = formatMessages(getPendingMessages());
+
+    expect(result).toContain(`<context timezone="${TIMEZONE}"`);
+    expect(result).not.toContain('interaction="voice"');
+    expect(result).not.toContain('<voice_response_instructions>');
+  });
+
+  it('ignores non-triggering voice context when a text message wakes the turn', () => {
+    insertMessage(
+      'm1',
+      'chat-sdk',
+      {
+        sender: 'Alice',
+        text: '[Voice transcript] background chatter',
+        interactionMode: 'voice',
+      },
+      { trigger: 0 },
+    );
+    insertMessage('m2', 'chat-sdk', {
+      sender: 'Bob',
+      text: 'NanoClaw, please answer this text message.',
+    });
+
+    const result = formatMessages(getPendingMessages());
+
+    expect(result).not.toContain('interaction="voice"');
+    expect(result).not.toContain('<voice_response_instructions>');
+  });
+
+  it('adds voice guidance when a voice message wakes a mixed batch', () => {
+    insertMessage(
+      'm1',
+      'chat-sdk',
+      {
+        sender: 'Alice',
+        text: 'Earlier text context',
+      },
+      { trigger: 0 },
+    );
+    insertMessage('m2', 'chat-sdk', {
+      sender: 'Bob',
+      text: '[Voice transcript] Please answer out loud.',
+      interactionMode: 'voice',
+    });
+
+    const result = formatMessages(getPendingMessages());
+
+    expect(result).toContain('interaction="voice"');
+    expect(result).toContain('<voice_response_instructions>');
+  });
+
+  it('treats the legacy voice transcript prefix as voice metadata', () => {
+    insertMessage('m1', 'chat-sdk', {
+      sender: 'Alice',
+      text: '[Voice transcript] Do you hear me?',
+    });
+
+    const result = formatMessages(getPendingMessages());
+
+    expect(result).toContain('interaction="voice"');
+    expect(result).toContain('<voice_response_instructions>');
   });
 });
 
@@ -183,9 +263,7 @@ describe('stripInternalTags', () => {
   });
 
   it('strips multi-line internal tags', () => {
-    expect(stripInternalTags('hello <internal>\nsecret\nstuff\n</internal> world')).toBe(
-      'hello  world',
-    );
+    expect(stripInternalTags('hello <internal>\nsecret\nstuff\n</internal> world')).toBe('hello  world');
   });
 
   it('strips multiple internal tag blocks', () => {
@@ -201,8 +279,6 @@ describe('stripInternalTags', () => {
   });
 
   it('preserves content that surrounds internal tags', () => {
-    expect(stripInternalTags('<internal>thinking</internal>The answer is 42')).toBe(
-      'The answer is 42',
-    );
+    expect(stripInternalTags('<internal>thinking</internal>The answer is 42')).toBe('The answer is 42');
   });
 });
