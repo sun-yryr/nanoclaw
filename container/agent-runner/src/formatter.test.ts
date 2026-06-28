@@ -177,6 +177,18 @@ describe('XML escaping', () => {
   });
 });
 
+describe('task message formatting', () => {
+  it('marks fired tasks as execute mode and forbids re-scheduling', () => {
+    insertMessage('t1', 'task', { prompt: 'Review open PRs' });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('<task mode="execute"');
+    expect(result).toContain('Scheduled task firing now');
+    expect(result).toContain('Do not call schedule_task');
+    expect(result).toContain('Instructions:');
+    expect(result).toContain('Review open PRs');
+  });
+});
+
 describe('stripInternalTags', () => {
   it('strips single-line internal tags and trims', () => {
     expect(stripInternalTags('hello <internal>secret</internal> world')).toBe('hello  world');

@@ -55,7 +55,8 @@ describe('formatter', () => {
     insertMessage('m1', 'task', { prompt: 'Review open PRs' });
     const messages = getPendingMessages();
     const prompt = formatMessages(messages);
-    expect(prompt).toContain('<task');
+    expect(prompt).toContain('<task mode="execute"');
+    expect(prompt).toContain('Do not call schedule_task');
     expect(prompt).toContain('Review open PRs');
   });
 

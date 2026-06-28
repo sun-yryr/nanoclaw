@@ -199,12 +199,17 @@ function formatTaskMessage(msg: MessageInRow): string {
   const content = parseContent(msg.content);
   const from = originAttr(msg);
   const time = formatLocalTime(msg.timestamp, TIMEZONE);
-  const parts: string[] = [];
+  const parts: string[] = [
+    'Scheduled task firing now — execute the instructions below immediately.',
+    'Do not call schedule_task, update_task, cancel_task, pause_task, or resume_task.',
+    'Recurrence and the next run are handled automatically by the host.',
+    '',
+  ];
   if (content.scriptOutput) {
     parts.push('Script output:', JSON.stringify(content.scriptOutput, null, 2), '');
   }
   parts.push('Instructions:', content.prompt || '');
-  return `<task${from} time="${escapeXml(time)}">${parts.join('\n')}</task>`;
+  return `<task${from} mode="execute" time="${escapeXml(time)}">${parts.join('\n')}</task>`;
 }
 
 function formatWebhookMessage(msg: MessageInRow): string {
