@@ -304,6 +304,7 @@ class DiscordVoiceController {
           kind: 'chat-sdk',
           content: JSON.stringify({
             text: `[Voice transcript] ${transcript}`,
+            interactionMode: 'voice',
             sender: speakerName,
             senderId: userId,
             author: {

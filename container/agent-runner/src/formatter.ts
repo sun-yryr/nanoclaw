@@ -11,8 +11,20 @@ import { TIMEZONE, formatLocalTime } from './timezone.js';
  */
 export type CommandCategory = 'admin' | 'filtered' | 'passthrough' | 'none';
 
-const ADMIN_COMMANDS = new Set(['/remote-control', '/clear', '/compact', '/context', '/cost', '/files', '/upload-trace']);
+const ADMIN_COMMANDS = new Set([
+  '/remote-control',
+  '/clear',
+  '/compact',
+  '/context',
+  '/cost',
+  '/files',
+  '/upload-trace',
+]);
 const FILTERED_COMMANDS = new Set(['/help', '/login', '/logout', '/doctor', '/config', '/start']);
+const VOICE_RESPONSE_INSTRUCTIONS = `<voice_response_instructions>
+This turn came from a live voice conversation and the reply will be spoken aloud with OpenAI TTS as well as posted to text chat.
+Keep the required message routing wrapper, but write the message body for listening: use short natural sentences, avoid markdown tables/code fences/raw URLs/long bullet lists, and spell out ambiguous symbols or numbers when helpful.
+</voice_response_instructions>`;
 
 export interface CommandInfo {
   category: CommandCategory;
@@ -127,7 +139,12 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
  * Strips routing fields — the agent never sees platform_id, channel_type, thread_id.
  */
 export function formatMessages(messages: MessageInRow[], options?: { omitAttachments?: boolean }): string {
-  const header = `<context timezone="${escapeXml(TIMEZONE)}" />\n`;
+  const hasVoiceWake = hasTriggeredVoiceMessage(messages);
+  const header =
+    [
+      `<context timezone="${escapeXml(TIMEZONE)}"${hasVoiceWake ? ' interaction="voice"' : ''} />`,
+      ...(hasVoiceWake ? [VOICE_RESPONSE_INSTRUCTIONS] : []),
+    ].join('\n') + '\n';
   if (messages.length === 0) return header;
 
   // Group by kind
@@ -152,6 +169,14 @@ export function formatMessages(messages: MessageInRow[], options?: { omitAttachm
   }
 
   return header + parts.join('\n\n');
+}
+
+function hasTriggeredVoiceMessage(messages: MessageInRow[]): boolean {
+  return messages.some((msg) => {
+    if (msg.trigger !== 1) return false;
+    if (msg.kind !== 'chat' && msg.kind !== 'chat-sdk') return false;
+    return isVoiceInteraction(parseContent(msg.content));
+  });
 }
 
 function formatChatMessages(messages: MessageInRow[], omitAttachments = false): string {
@@ -267,6 +292,13 @@ function parseContent(json: string): any {
   } catch {
     return { text: json };
   }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isVoiceInteraction(content: any): boolean {
+  if (content?.interactionMode === 'voice') return true;
+  const text = typeof content?.text === 'string' ? content.text.trimStart() : '';
+  return text.startsWith('[Voice transcript]');
 }
 
 function escapeXml(str: string): string {
