@@ -5,11 +5,11 @@ description: Add Mapbox as an MCP tool for geocoding, search, route directions, 
 
 # Add Mapbox Tool (OneCLI-native)
 
-This skill wires [`@mapbox/mcp-server`](https://www.npmjs.com/package/@mapbox/mcp-server) into selected agent groups. The MCP server reads `MAPBOX_ACCESS_TOKEN` from its environment; NanoClaw stores only the `onecli-managed` placeholder, and the OneCLI gateway swaps the real Mapbox access token into requests.
+This skill wires [`@mapbox/mcp-server`](https://www.npmjs.com/package/@mapbox/mcp-server) into selected agent groups. The MCP server reads `MAPBOX_ACCESS_TOKEN` from its environment; NanoClaw stores only a JWT-shaped OneCLI placeholder, and the OneCLI gateway swaps the real Mapbox access token into requests.
 
 Tools exposed (surfaced as `mcp__mapbox__<name>`, exact set depends on package version): geocoding, reverse geocoding, search, directions, matrix, optimization, map matching, isochrone, static maps, and offline Turf.js-style geospatial calculations such as distance, area, bearing, buffer, bbox, centroid, and simplify.
 
-**Why this pattern:** v2's invariant is that containers never receive raw API keys. Unlike Google OAuth MCP servers, Mapbox needs no local credential stub files; the only credential-shaped value persisted in NanoClaw is `MAPBOX_ACCESS_TOKEN=onecli-managed`.
+**Why this pattern:** v2's invariant is that containers never receive raw API keys. Unlike Google OAuth MCP servers, Mapbox needs no local credential stub files. `@mapbox/mcp-server` validates `MAPBOX_ACCESS_TOKEN` has Mapbox's three-part token shape before it makes API calls, so use a harmless JWT-shaped placeholder instead of the plain string `onecli-managed`; OneCLI still replaces the outbound `access_token` query parameter with the real secret.
 
 ## Phase 1: Pre-flight
 
@@ -84,17 +84,18 @@ For each agent group that should have Mapbox (use `ncl groups list` to enumerate
 ### Register the MCP server
 
 ```bash
+MAPBOX_PLACEHOLDER='pk.eyJ1Ijoib25lY2xpLW1hbmFnZWQifQ.placeholder'
 ncl groups config add-mcp-server \
   --id <group-id> \
   --name mapbox \
   --command mcp-server \
   --args '[]' \
-  --env '{"MAPBOX_ACCESS_TOKEN":"onecli-managed","ENABLE_MCP_UI":"false","CLIENT_NEEDS_RESOURCE_FALLBACK":"true"}'
+  --env "{\"MAPBOX_ACCESS_TOKEN\":\"$MAPBOX_PLACEHOLDER\",\"ENABLE_MCP_UI\":\"false\",\"CLIENT_NEEDS_RESOURCE_FALLBACK\":\"true\"}"
 ```
 
 Why these env vars:
 
-- `MAPBOX_ACCESS_TOKEN=onecli-managed` keeps the real token in OneCLI.
+- `MAPBOX_ACCESS_TOKEN=pk.eyJ1Ijoib25lY2xpLW1hbmFnZWQifQ.placeholder` is not a real Mapbox token; it only passes the MCP server's local `header.payload.signature` shape check. OneCLI keeps and injects the real token.
 - `ENABLE_MCP_UI=false` avoids UI-resource responses that are not useful in chat-only agents.
 - `CLIENT_NEEDS_RESOURCE_FALLBACK=true` exposes resource fallback tools for providers that only bridge MCP tools.
 
@@ -145,6 +146,7 @@ Common signals:
 
 - `command not found: mcp-server` -> image not rebuilt or global install failed.
 - `MAPBOX_ACCESS_TOKEN` missing -> the MCP server was registered without the env block.
+- `Access token is not in valid JWT format` -> `MAPBOX_ACCESS_TOKEN` is still the old plain `onecli-managed` placeholder; re-register with the JWT-shaped placeholder above and restart the agent container.
 - `401 Unauthorized` / `403 Forbidden` from Mapbox -> OneCLI is not injecting, the token lacks required scopes, or the token has URL restrictions incompatible with server-side calls.
 - Agent says "I do not have Mapbox tools" -> the `mapbox` MCP server is not registered in this group's `mcpServers`, or the running container has not restarted.
 
