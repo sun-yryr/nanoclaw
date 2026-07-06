@@ -29,6 +29,7 @@ ARG BRAVE_SEARCH_MCP_VERSION=2.0.83
 ARG GMAIL_MCP_VERSION=1.1.11
 ARG GDRIVE_MCP_VERSION=2025.1.14
 ARG GTASKS_MCP_VERSION=0.2.1
+ARG MAPBOX_MCP_VERSION=0.12.5
 
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
@@ -129,7 +130,8 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g \
         "@cocal/google-calendar-mcp@${CALENDAR_MCP_VERSION}" \
-        "@brave/brave-search-mcp-server@${BRAVE_SEARCH_MCP_VERSION}"
+        "@brave/brave-search-mcp-server@${BRAVE_SEARCH_MCP_VERSION}" \
+        "@mapbox/mcp-server@${MAPBOX_MCP_VERSION}"
 
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g \

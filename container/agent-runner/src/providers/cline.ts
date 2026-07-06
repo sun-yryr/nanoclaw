@@ -7,10 +7,88 @@ import { spawnSync } from 'child_process';
 import { buildClineBuiltinTools } from './cline-builtin-tools.js';
 import { resolveComposedClaudeMd } from '../claude-md-resolve.js';
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput, UserContentPart } from './types.js';
+import type {
+  AgentProvider,
+  AgentQuery,
+  McpServerConfig,
+  ProviderEvent,
+  ProviderOptions,
+  QueryInput,
+  UserContentPart,
+} from './types.js';
 
 function log(msg: string): void {
   console.error(`[cline-provider] ${msg}`);
+}
+
+const SENSITIVE_KEY = /(api[_-]?key|authorization|bearer|cookie|credential|password|secret|token)/i;
+
+function redactString(value: string): string {
+  return value
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+    .replace(
+      /(api[_-]?key|authorization|cookie|credential|password|secret|token)(["']?\s*[:=]\s*["']?)[^"',\s}]+/gi,
+      '$1$2[REDACTED]',
+    );
+}
+
+function summarizeUnknown(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') return redactString(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value !== 'object') return String(value);
+  if (seen.has(value)) return '[Circular]';
+  seen.add(value);
+
+  if (value instanceof Error) {
+    const err = value as Error & Record<string, unknown>;
+    const out: Record<string, unknown> = {
+      name: err.name,
+      message: redactString(err.message),
+    };
+    for (const key of ['code', 'status', 'statusCode', 'type', 'requestId', 'response', 'cause']) {
+      if (err[key] !== undefined) out[key] = summarizeUnknown(err[key], seen);
+    }
+    if (err.stack) out.stack = redactString(err.stack).split('\n').slice(0, 8).join('\n');
+    return out;
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (SENSITIVE_KEY.test(key)) {
+      out[key] = '[REDACTED]';
+    } else {
+      out[key] = summarizeUnknown(raw, seen);
+    }
+  }
+  return out;
+}
+
+function describeError(err: unknown, fallback: string): { message: string; classification: string; detail: string } {
+  const record = err && typeof err === 'object' ? (err as Record<string, unknown>) : {};
+  const message = err instanceof Error ? err.message : typeof err === 'string' ? err : fallback;
+  const parts = [
+    err instanceof Error ? err.name : undefined,
+    record.code,
+    record.status,
+    record.statusCode,
+    record.type,
+  ]
+    .filter((part): part is string | number => typeof part === 'string' || typeof part === 'number')
+    .map(String);
+
+  let detail: string;
+  try {
+    detail = JSON.stringify(summarizeUnknown(err));
+  } catch {
+    detail = redactString(String(err));
+  }
+
+  return {
+    message: redactString(message || fallback),
+    classification: parts.length > 0 ? parts.join('/') : 'unclassified',
+    detail,
+  };
 }
 
 // ── Memory tools (inline to avoid ai-sdk / cline-sdk type mismatch) ──
@@ -43,7 +121,8 @@ const memoryReadTool = createTool({
     properties: {
       query: {
         type: 'string',
-        description: 'The topic or question to search memory for. E.g., user preferences, past decisions, project context.',
+        description:
+          'The topic or question to search memory for. E.g., user preferences, past decisions, project context.',
       },
     },
     required: ['query'],
@@ -71,7 +150,8 @@ const memoryWriteTool = createTool({
     properties: {
       insight: {
         type: 'string',
-        description: 'The factual insight to remember. E.g., "User prefers TypeScript over Python" or "Project deadline is June 30"',
+        description:
+          'The factual insight to remember. E.g., "User prefers TypeScript over Python" or "Project deadline is June 30"',
       },
     },
     required: ['insight'],
@@ -162,7 +242,9 @@ export class ClineProvider implements AgentProvider {
 
   isSessionInvalid(err: unknown): boolean {
     const msg = err instanceof Error ? err.message : String(err);
-    return /no conversation found|session.*not found|NotFoundError|401|403|Unauthorized|api key|model not found/i.test(msg);
+    return /no conversation found|session.*not found|NotFoundError|401|403|Unauthorized|api key|model not found/i.test(
+      msg,
+    );
   }
 
   query(input: QueryInput): AgentQuery {
@@ -202,11 +284,7 @@ export class ClineProvider implements AgentProvider {
         const builtinTools = buildClineBuiltinTools(input.cwd);
         log(`Loaded ${builtinTools.length} Cline built-in tools: ${builtinTools.map((t) => t.name).join(', ')}`);
 
-        let tools: ReturnType<typeof createTool>[] = [
-          ...builtinTools,
-          memoryReadTool,
-          memoryWriteTool,
-        ];
+        let tools: ReturnType<typeof createTool>[] = [...builtinTools, memoryReadTool, memoryWriteTool];
         if (Object.keys(self.mcpServers).length > 0) {
           mcpRegistry = new McpToolRegistry();
           await mcpRegistry.init(self.mcpServers);
@@ -270,7 +348,14 @@ export class ClineProvider implements AgentProvider {
             }
             case 'run-failed': {
               const error = (event as any).error;
-              providerEvent = { type: 'error', message: error?.message ?? 'Run failed', retryable: true };
+              const described = describeError(error, 'Run failed');
+              log(`run-failed error detail: ${described.detail}`);
+              providerEvent = {
+                type: 'error',
+                message: described.message,
+                retryable: true,
+                classification: described.classification,
+              };
               break;
             }
             case 'status-notice': {
@@ -303,12 +388,27 @@ export class ClineProvider implements AgentProvider {
               `${imageCount} image(s), ${videoCount} video(s)`,
           );
         }
-        const runPromise = agent.run(firstInput).then((r: AgentRunResult) => {
-          runDone = true;
-          runResult = r;
-          eventWaiting?.();
-          return r;
-        });
+        const runPromise = agent
+          .run(firstInput)
+          .then((r: AgentRunResult) => {
+            runDone = true;
+            runResult = r;
+            eventWaiting?.();
+            return r;
+          })
+          .catch((err: unknown) => {
+            const described = describeError(err, 'Run failed');
+            log(`agent.run rejected: ${described.detail}`);
+            events.push({
+              type: 'error',
+              message: described.message,
+              retryable: true,
+              classification: described.classification,
+            });
+            runDone = true;
+            eventWaiting?.();
+          });
+        void runPromise;
 
         while (!runDone) {
           while (events.length > 0) {
@@ -326,7 +426,14 @@ export class ClineProvider implements AgentProvider {
 
         if (runResult) {
           if (runResult.status !== 'completed') {
-            yield { type: 'error', message: runResult.error?.message ?? 'Run failed', retryable: true };
+            const described = describeError(runResult.error, 'Run failed');
+            log(`agent.run non-completed status=${runResult.status}: ${described.detail}`);
+            yield {
+              type: 'error',
+              message: described.message,
+              retryable: true,
+              classification: described.classification,
+            };
           }
         }
 
@@ -361,12 +468,27 @@ export class ClineProvider implements AgentProvider {
 
             let continueDone = false;
             let continueResult: Awaited<ReturnType<typeof agent.continue>> | undefined;
-            const continuePromise = agent.continue(toAgentInput(followUp.text, followUp.userContent)).then((r: AgentRunResult) => {
-              continueDone = true;
-              continueResult = r;
-              eventWaiting?.();
-              return r;
-            });
+            const continuePromise = agent
+              .continue(toAgentInput(followUp.text, followUp.userContent))
+              .then((r: AgentRunResult) => {
+                continueDone = true;
+                continueResult = r;
+                eventWaiting?.();
+                return r;
+              })
+              .catch((err: unknown) => {
+                const described = describeError(err, 'Continue failed');
+                log(`agent.continue rejected: ${described.detail}`);
+                events.push({
+                  type: 'error',
+                  message: described.message,
+                  retryable: true,
+                  classification: described.classification,
+                });
+                continueDone = true;
+                eventWaiting?.();
+              });
+            void continuePromise;
 
             while (!continueDone) {
               while (events.length > 0) {
@@ -384,7 +506,14 @@ export class ClineProvider implements AgentProvider {
 
             if (continueResult) {
               if (continueResult.status !== 'completed') {
-                yield { type: 'error', message: continueResult.error?.message ?? 'Continue failed', retryable: true };
+                const described = describeError(continueResult.error, 'Continue failed');
+                log(`agent.continue non-completed status=${continueResult.status}: ${described.detail}`);
+                yield {
+                  type: 'error',
+                  message: described.message,
+                  retryable: true,
+                  classification: described.classification,
+                };
               }
             }
           }
@@ -392,9 +521,14 @@ export class ClineProvider implements AgentProvider {
           firstTurn = false;
         }
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        log(`gen() caught error: ${message}`);
-        yield { type: 'error', message, retryable: true };
+        const described = describeError(err, 'Provider error');
+        log(`gen() caught error detail: ${described.detail}`);
+        yield {
+          type: 'error',
+          message: described.message,
+          retryable: true,
+          classification: described.classification,
+        };
       } finally {
         if (mcpRegistry) {
           await mcpRegistry.close();
