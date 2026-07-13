@@ -1,11 +1,9 @@
 /**
  * Dependency guard for the tablesnap CLI integration point (host tree, vitest).
  *
- * add-tablesnap installs tablesnap from a GitHub release into the agent image via
- * `container/Dockerfile`. A release binary is not importable or typed, so neither
- * `tsc` nor a runtime import can catch its removal. This structural test parses
- * the Dockerfile and asserts the pinned `ARG TABLESNAP_VERSION=...` and the
- * download/install of `tablesnap-linux-${ARCH}` are present.
+ * tablesnap is built from source (CJK font patch) in a golang stage and copied
+ * into the agent image. A release binary is not importable or typed, so this
+ * structural test asserts the build stage, IPA Gothic font, and binary install.
  */
 import fs from 'fs';
 import path from 'path';
@@ -24,16 +22,22 @@ function dockerfile(): string {
   throw new Error('container/Dockerfile not found walking up from ' + __dirname);
 }
 
-describe('container/Dockerfile installs tablesnap', () => {
+describe('container/Dockerfile installs tablesnap with CJK fonts', () => {
   const text = dockerfile();
 
   it('declares a pinned TABLESNAP_VERSION build arg', () => {
     expect(text).toMatch(/^ARG\s+TABLESNAP_VERSION=\S+/m);
   });
 
-  it('downloads the tablesnap linux release tarball', () => {
-    expect(text).toContain('joargp/tablesnap/releases/download');
-    expect(text).toMatch(/tablesnap-linux-\$\{ARCH\}/);
+  it('builds tablesnap from source with the CJK font patch', () => {
+    expect(text).toMatch(/AS\s+tablesnap-build/);
+    expect(text).toContain('tablesnap/cjk-font.patch');
+    expect(text).toContain('joargp/tablesnap.git');
+  });
+
+  it('installs IPA Gothic for Japanese table text', () => {
+    expect(text).toMatch(/fonts-ipafont-gothic/);
+    expect(text).toMatch(/TABLESNAP_FONT=.*ipag\.ttf/);
   });
 
   it('installs the binary to /usr/local/bin/tablesnap', () => {

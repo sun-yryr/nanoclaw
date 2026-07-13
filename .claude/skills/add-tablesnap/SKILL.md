@@ -29,23 +29,40 @@ Note the version without the `v` prefix (e.g. `1.0.0`) for `TABLESNAP_VERSION`.
 
 ## Phase 2: Apply Changes
 
-### 1. Dockerfile — install tablesnap binary
+### 1. Dockerfile — build patched tablesnap + IPA Gothic
 
-Insert the tablesnap block immediately above the `# ---- Bun runtime` section of `container/Dockerfile` (skip if `grep -q 'TABLESNAP_VERSION' container/Dockerfile` already matches):
+Insert a golang build stage at the top of `container/Dockerfile` (before `FROM node:22-slim`) and the install block above `# ---- Bun runtime` (skip pieces already present):
 
 ```dockerfile
-# ---- tablesnap — markdown tables → PNG ---------------------------------------
 ARG TABLESNAP_VERSION=1.0.0
-RUN ARCH=$(dpkg --print-architecture) && \
-    curl -fsSL "https://github.com/joargp/tablesnap/releases/download/v${TABLESNAP_VERSION}/tablesnap-linux-${ARCH}.tar.gz" \
-    | tar -xz -C /tmp && \
-    install -m 0755 "/tmp/tablesnap-linux-${ARCH}" /usr/local/bin/tablesnap && \
-    rm -f "/tmp/tablesnap-linux-${ARCH}" "/tmp/._tablesnap-linux-${ARCH}" && \
-    HOME=/home/node tablesnap emojis install && \
-    chown -R node:node /home/node/.cache
+FROM golang:1.24-bookworm AS tablesnap-build
+ARG TABLESNAP_VERSION
+WORKDIR /src
+RUN git clone --depth 1 --branch "v${TABLESNAP_VERSION}" https://github.com/joargp/tablesnap.git .
+COPY tablesnap/cjk-font.patch /tmp/cjk-font.patch
+RUN git apply /tmp/cjk-font.patch && \
+    CGO_ENABLED=0 go build -o /tablesnap ./cmd/tablesnap
 ```
 
-The release tarball contains `tablesnap-linux-${ARCH}` (not a bare `tablesnap`). `emojis install` downloads Twemoji so status emoji in cells render as color glyphs.
+In the apt install list of the node stage, add `fonts-ipafont-gothic` (Japanese TTF for table text; ~12MB — smaller than full `fonts-noto-cjk`).
+
+Then after mnemon / before Bun:
+
+```dockerfile
+COPY --from=tablesnap-build /tablesnap /usr/local/bin/tablesnap
+RUN HOME=/home/node tablesnap emojis install && \
+    chown -R node:node /home/node/.cache
+ENV TABLESNAP_FONT=/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf
+```
+
+Copy the patch from the skill:
+
+```bash
+mkdir -p container/tablesnap
+cp .claude/skills/add-tablesnap/tablesnap/cjk-font.patch container/tablesnap/cjk-font.patch
+```
+
+The upstream release embeds Inter only (no CJK). The patch prefers `TABLESNAP_FONT` / IPA Gothic, then falls back to Inter. `emojis install` still downloads Twemoji for status glyphs.
 
 ### 2. Copy the container skill
 

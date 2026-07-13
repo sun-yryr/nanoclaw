@@ -10,6 +10,16 @@
 # bind mount at runtime (see src/container-runner.ts). Source-only changes
 # never require an image rebuild.
 
+# ---- tablesnap (patched for CJK system fonts) --------------------------------
+ARG TABLESNAP_VERSION=1.0.0
+FROM golang:1.24-bookworm AS tablesnap-build
+ARG TABLESNAP_VERSION
+WORKDIR /src
+RUN git clone --depth 1 --branch "v${TABLESNAP_VERSION}" https://github.com/joargp/tablesnap.git .
+COPY tablesnap/cjk-font.patch /tmp/cjk-font.patch
+RUN git apply /tmp/cjk-font.patch && \
+    CGO_ENABLED=0 go build -o /tablesnap ./cmd/tablesnap
+
 FROM node:22-slim
 
 # ---- Build-time arguments ----------------------------------------------------
@@ -34,12 +44,15 @@ ARG MAPBOX_MCP_VERSION=0.12.5
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
 # SIGTERM instead of being orphaned by the shell entrypoint.
+# fonts-ipafont-gothic (~12MB): Japanese-capable TTF for tablesnap (embedded
+# Inter has no CJK coverage). Full Noto CJK remains behind INSTALL_CJK_FONTS.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
         chromium \
         fonts-liberation \
         fonts-noto-color-emoji \
+        fonts-ipafont-gothic \
         libgbm1 \
         libnss3 \
         libatk-bridge2.0-0 \
@@ -79,15 +92,11 @@ RUN ARCH=$(dpkg --print-architecture) && \
 
 ENV MNEMON_DATA_DIR=/workspace/agent/.claude/mnemon
 
-# ---- tablesnap — markdown tables → PNG ---------------------------------------
-ARG TABLESNAP_VERSION=1.0.0
-RUN ARCH=$(dpkg --print-architecture) && \
-    curl -fsSL "https://github.com/joargp/tablesnap/releases/download/v${TABLESNAP_VERSION}/tablesnap-linux-${ARCH}.tar.gz" \
-    | tar -xz -C /tmp && \
-    install -m 0755 "/tmp/tablesnap-linux-${ARCH}" /usr/local/bin/tablesnap && \
-    rm -f "/tmp/tablesnap-linux-${ARCH}" "/tmp/._tablesnap-linux-${ARCH}" && \
-    HOME=/home/node tablesnap emojis install && \
+# ---- tablesnap — markdown tables → PNG (CJK via IPA Gothic) ------------------
+COPY --from=tablesnap-build /tablesnap /usr/local/bin/tablesnap
+RUN HOME=/home/node tablesnap emojis install && \
     chown -R node:node /home/node/.cache
+ENV TABLESNAP_FONT=/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf
 
 # ---- Bun runtime -------------------------------------------------------------
 # Install via the official script (handles multi-arch detection), then move

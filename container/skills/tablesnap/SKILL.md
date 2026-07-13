@@ -43,3 +43,5 @@ tablesnap -i /workspace/agent/table.md --theme dark --font-size 16 -o /workspace
 ```
 
 Bundled status emoji that render without extra setup: ✅ ❌ 🔴 🟢 🟡 ⭕ ⚠️
+
+Japanese (and other CJK) text uses IPA Gothic via `TABLESNAP_FONT` in the agent image — no extra flags needed.

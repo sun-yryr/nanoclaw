@@ -2,23 +2,17 @@
 
 Every step is idempotent — safe to re-run.
 
-## 1. Strip the Dockerfile install layer
+## 1. Strip the Dockerfile install layers
 
-Open `container/Dockerfile` and delete the tablesnap block (the `# ---- tablesnap` comment through the `chown` line):
+1. Delete the `tablesnap-build` stage at the top of `container/Dockerfile` (`ARG TABLESNAP_VERSION` + `FROM golang:... AS tablesnap-build` through the `go build` `RUN`).
+2. Remove `fonts-ipafont-gothic` from the apt install list.
+3. Delete the tablesnap install block (`COPY --from=tablesnap-build`, emoji install `RUN`, and `ENV TABLESNAP_FONT=...`).
 
-```dockerfile
-# ---- tablesnap — markdown tables → PNG ---------------------------------------
-ARG TABLESNAP_VERSION=1.0.0
-RUN ARCH=$(dpkg --print-architecture) && \
-    curl -fsSL "https://github.com/joargp/tablesnap/releases/download/v${TABLESNAP_VERSION}/tablesnap-linux-${ARCH}.tar.gz" \
-    | tar -xz -C /tmp && \
-    install -m 0755 "/tmp/tablesnap-linux-${ARCH}" /usr/local/bin/tablesnap && \
-    rm -f "/tmp/tablesnap-linux-${ARCH}" "/tmp/._tablesnap-linux-${ARCH}" && \
-    HOME=/home/node tablesnap emojis install && \
-    chown -R node:node /home/node/.cache
+Also remove the patch directory:
+
+```bash
+rm -rf container/tablesnap
 ```
-
-If the block is already gone, skip this step.
 
 ## 2. Remove the container skill
 
@@ -37,15 +31,7 @@ In `container/skills/discord-formatting/SKILL.md`, restore the tables bullet to:
 - **NO** tables (Discord does not render markdown tables — use bullets or a code block)
 ```
 
-Remove the quick rule about tablesnap if present. Re-sync discord-formatting to session skill dirs if you keep Discord:
-
-```bash
-for session_dir in data/v2-sessions/ag-*; do
-  if [ -d "$session_dir/.claude-shared/skills/discord-formatting" ]; then
-    rsync -a container/skills/discord-formatting/ "$session_dir/.claude-shared/skills/discord-formatting/"
-  fi
-done
-```
+Remove the quick rule about tablesnap if present.
 
 ## 4. Delete the dependency guard test
 
