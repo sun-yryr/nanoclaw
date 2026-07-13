@@ -87,11 +87,13 @@ Skills that run inside the agent container, not on the host. These teach the con
 
 **Examples:** `agent-browser` (web browsing), `capabilities` (/capabilities command), `status` (/status command), `slack-formatting` (Slack mrkdwn syntax)
 
-**Key difference:** These are NOT invoked by the user on the host. They're loaded by Claude Code inside the container and influence how the agent behaves.
+**Key difference:** These are NOT invoked by the user on the host. They're loaded by the agent runtime inside the container and influence how the agent behaves.
+
+**Runtime loading (progressive disclosure):** Follows the [Agent Skills](https://agentskills.io/specification) pattern shared with OpenCode/Codex/Claude Code. Level 1 (`name` + `description` from frontmatter) is always visible for discovery; Level 2 (full `SKILL.md` body) loads only when the agent activates the skill. Under Claude Code this is the `Skill` tool + `~/.claude/skills` symlinks. Under Cline, NanoClaw injects an OpenCode-shaped `<available_skills>` catalog into the `skills` tool description and loads the body on `skills({ skill })`. Write a specific `description` — that is what triggers activation.
 
 **Guidelines:**
 - Follow the same SKILL.md + frontmatter format
-- Use `allowed-tools` frontmatter to scope tool permissions
+- Use `allowed-tools` frontmatter to scope tool permissions (Claude Code)
 - Keep them focused — the agent's context window is shared across all container skills
 
 ### Writing a good skill

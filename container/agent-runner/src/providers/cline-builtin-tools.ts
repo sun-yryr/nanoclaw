@@ -6,22 +6,31 @@
  * mutually exclusive in a single createDefaultTools call (editor vs
  * apply_patch; ask_question vs submit_and_exit), so we merge targeted
  * passes to expose the full documented suite.
+ *
+ * Skills follow OpenCode / Agent Skills progressive disclosure: Level-1
+ * name+description live in the skills tool description; Level-2 SKILL.md
+ * body loads on demand when the agent calls skills({ skill }).
  */
-import fs from 'fs';
-import path from 'path';
-
 import {
   ALL_DEFAULT_TOOL_NAMES,
   createDefaultExecutors,
   createDefaultTools,
+  createTool,
   type AgentTool,
 } from '@cline/sdk';
 
 import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
+import {
+  defaultSkillRoots,
+  findSkillInCatalog,
+  formatAvailableSkillsXml,
+  listSkillCatalog,
+  loadSkillMarkdown,
+  type SkillCatalogEntry,
+} from '../skills/catalog.js';
 
-const SKILL_SEARCH_DIRS = ['/app/skills'];
 const ASK_TIMEOUT_MS = 300_000;
 
 function sleep(ms: number): Promise<void> {
@@ -30,59 +39,6 @@ function sleep(ms: number): Promise<void> {
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-interface SkillMeta {
-  id: string;
-  name: string;
-  disabled: boolean;
-}
-
-type SkillsExecutor = ((skill: string, args: string | undefined) => Promise<string>) & {
-  configuredSkills?: SkillMeta[];
-};
-
-function discoverSkills(cwd: string): SkillsExecutor {
-  const configuredSkills: SkillMeta[] = [];
-  const roots = [...SKILL_SEARCH_DIRS, path.join(cwd, 'skills')];
-
-  for (const root of roots) {
-    if (!fs.existsSync(root)) continue;
-    for (const entry of fs.readdirSync(root)) {
-      const skillDir = path.join(root, entry);
-      if (!fs.statSync(skillDir).isDirectory()) continue;
-      const skillMd = path.join(skillDir, 'SKILL.md');
-      if (!fs.existsSync(skillMd)) continue;
-      configuredSkills.push({ id: entry, name: entry, disabled: false });
-    }
-  }
-
-  const executor = (async (skill: string, args: string | undefined) => {
-    const normalized = skill.trim().toLowerCase();
-    for (const root of roots) {
-      const skillMd = path.join(root, skill, 'SKILL.md');
-      if (fs.existsSync(skillMd)) {
-        const body = fs.readFileSync(skillMd, 'utf-8');
-        return args ? `${body}\n\n---\nArguments: ${args}` : body;
-      }
-    }
-    for (const root of roots) {
-      if (!fs.existsSync(root)) continue;
-      for (const entry of fs.readdirSync(root)) {
-        if (entry.toLowerCase() !== normalized) continue;
-        const skillMd = path.join(root, entry, 'SKILL.md');
-        if (fs.existsSync(skillMd)) {
-          const body = fs.readFileSync(skillMd, 'utf-8');
-          return args ? `${body}\n\n---\nArguments: ${args}` : body;
-        }
-      }
-    }
-    const available = configuredSkills.map((s: SkillMeta) => s.name).join(', ') || '(none)';
-    throw new Error(`Skill "${skill}" not found. Available: ${available}`);
-  }) as SkillsExecutor;
-
-  executor.configuredSkills = configuredSkills;
-  return executor;
 }
 
 async function askQuestionViaChannel(question: string, options: string[]): Promise<string> {
@@ -135,13 +91,56 @@ function mergeTools(...groups: AgentTool[][]): AgentTool[] {
 }
 
 /**
+ * OpenCode-shaped skills tool: Level-1 catalog in description, Level-2 body on call.
+ * Replaces the SDK default which only lists skill names.
+ */
+export function createSkillsTool(catalog: SkillCatalogEntry[]): AgentTool {
+  const xml = formatAvailableSkillsXml(catalog);
+  const description =
+    'Load a skill by name to get full instructions for a specialized workflow. ' +
+    'Match the user task against skill descriptions, then call this tool before acting. ' +
+    'After loading, follow the skill body; read linked references/scripts only as needed.\n\n' +
+    xml;
+
+  return createTool({
+    name: 'skills',
+    description,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        skill: {
+          type: 'string',
+          description: 'Skill name from <available_skills> (directory / frontmatter name).',
+        },
+        args: {
+          type: 'string',
+          description: 'Optional arguments to append when loading the skill.',
+        },
+      },
+      required: ['skill'],
+    },
+    execute: async ({ skill, args }: { skill: unknown; args?: unknown }) => {
+      const name = String(skill ?? '').trim();
+      const entry = findSkillInCatalog(catalog, name);
+      if (!entry) {
+        const available = catalog.map((e) => e.name).join(', ') || '(none)';
+        throw new Error(`Skill "${name}" not found. Available: ${available}`);
+      }
+      const argStr = args == null || args === '' ? undefined : String(args);
+      return loadSkillMarkdown(entry, argStr);
+    },
+  });
+}
+
+/**
  * Build the full Cline built-in tool suite documented at
  * https://docs.cline.bot/sdk/tools
  */
 export function buildClineBuiltinTools(cwd: string): AgentTool[] {
+  const catalog = listSkillCatalog(defaultSkillRoots(cwd));
+
   const executors = {
     ...createDefaultExecutors(),
-    skills: discoverSkills(cwd),
     askQuestion: askQuestionViaChannel,
     submit: async (summary: string, _verified: boolean) => summary,
   };
@@ -153,7 +152,8 @@ export function buildClineBuiltinTools(cwd: string): AgentTool[] {
     enableSearch: true,
     enableBash: true,
     enableWebFetch: true,
-    enableSkills: true,
+    // SDK skills tool only exposes names — we inject OpenCode-shaped skills below.
+    enableSkills: false,
   } as const;
 
   const disabled = {
@@ -188,7 +188,7 @@ export function buildClineBuiltinTools(cwd: string): AgentTool[] {
     enableAskQuestion: true,
   });
 
-  return mergeTools(main, patch, ask);
+  return mergeTools(main, patch, ask, [createSkillsTool(catalog)]);
 }
 
 export function expectedClineBuiltinToolNames(): readonly string[] {
