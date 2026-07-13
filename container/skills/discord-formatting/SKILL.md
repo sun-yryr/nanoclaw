@@ -82,7 +82,7 @@ Use display names in prose when you don't have the snowflake ID. Don't paste Sla
 
 - **NO** `[url](url)` links where the bracket text is the same as the URL (use bare URL or `[title](url)` instead)
 - **NO** Slack mrkdwn (`<https://example.com|text>`, `*bold*` for bold in Slack sense)
-- **NO** tables (Discord does not render markdown tables — use bullets or a code block)
+- **NO** markdown tables in message text (Discord does not render them — use the `tablesnap` skill: render to PNG, then `send_file`)
 - **NO** `---` horizontal rules (not supported)
 
 ## Example message
@@ -105,3 +105,4 @@ https://mail.google.com/mail/u/0/#inbox
 3. Prefer bullets for lists; headings optional in short replies
 4. Check `from="discord-..."` on inbound messages to know you're on Discord
 5. When in doubt about a link, use the bare URL
+6. Tabular data → `tablesnap` PNG + `send_file` (never paste a markdown table)

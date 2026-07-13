@@ -79,6 +79,16 @@ RUN ARCH=$(dpkg --print-architecture) && \
 
 ENV MNEMON_DATA_DIR=/workspace/agent/.claude/mnemon
 
+# ---- tablesnap — markdown tables → PNG ---------------------------------------
+ARG TABLESNAP_VERSION=1.0.0
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL "https://github.com/joargp/tablesnap/releases/download/v${TABLESNAP_VERSION}/tablesnap-linux-${ARCH}.tar.gz" \
+    | tar -xz -C /tmp && \
+    install -m 0755 "/tmp/tablesnap-linux-${ARCH}" /usr/local/bin/tablesnap && \
+    rm -f "/tmp/tablesnap-linux-${ARCH}" "/tmp/._tablesnap-linux-${ARCH}" && \
+    HOME=/home/node tablesnap emojis install && \
+    chown -R node:node /home/node/.cache
+
 # ---- Bun runtime -------------------------------------------------------------
 # Install via the official script (handles multi-arch detection), then move
 # the binary to /usr/local/bin so the non-root `node` user can execute it.
