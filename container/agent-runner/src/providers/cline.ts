@@ -1,10 +1,17 @@
 import { Agent, createTool } from '@cline/sdk';
-import type { AgentRunResult, AgentRuntimeEvent, AgentRuntimeStateSnapshot } from '@cline/agents';
+import type { AgentRunResult, AgentRuntimeEvent } from '@cline/agents';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { spawnSync } from 'child_process';
+import crypto from 'crypto';
 
 import { buildClineBuiltinTools } from './cline-builtin-tools.js';
+import {
+  isOpaqueSessionId,
+  loadSessionSnapshot,
+  maybeRotateClineContinuation,
+  saveSessionSnapshot,
+} from './cline-sessions.js';
 import { resolveComposedClaudeMd } from '../claude-md-resolve.js';
 import { registerProvider } from './provider-registry.js';
 import type {
@@ -242,9 +249,17 @@ export class ClineProvider implements AgentProvider {
 
   isSessionInvalid(err: unknown): boolean {
     const msg = err instanceof Error ? err.message : String(err);
-    return /no conversation found|session.*not found|NotFoundError|401|403|Unauthorized|api key|model not found/i.test(
+    return /no conversation found|session.*not found|NotFoundError|missing transcript|ENOENT|401|403|Unauthorized|api key|model not found/i.test(
       msg,
     );
+  }
+
+  /**
+   * Claude-shaped cold-resume guard: drop oversized / stale / legacy
+   * continuations before we try to reload them.
+   */
+  maybeRotateContinuation(continuation: string): string | null {
+    return maybeRotateClineContinuation(continuation);
   }
 
   query(input: QueryInput): AgentQuery {
@@ -309,18 +324,36 @@ export class ClineProvider implements AgentProvider {
           maxIterations: 50,
         });
 
-        // Restore previous conversation if continuation is provided
-        if (input.continuation) {
-          try {
-            const snapshot = JSON.parse(input.continuation) as AgentRuntimeStateSnapshot;
-            if (snapshot.messages && snapshot.messages.length > 0) {
-              agent.restore(snapshot.messages);
-              log(`Restored ${snapshot.messages.length} messages from continuation`);
-            }
-          } catch (err) {
-            log(`Failed to restore continuation: ${err instanceof Error ? err.message : String(err)}`);
+        // Claude-shaped resume: continuation is an opaque session id; the
+        // conversation body lives on disk under ~/.claude/cline-sessions/.
+        let sessionId =
+          input.continuation && isOpaqueSessionId(input.continuation)
+            ? input.continuation
+            : crypto.randomUUID();
+
+        if (input.continuation && isOpaqueSessionId(input.continuation)) {
+          const snapshot = loadSessionSnapshot(input.continuation);
+          if (snapshot?.messages && snapshot.messages.length > 0) {
+            agent.restore(snapshot.messages);
+            log(`Restored ${snapshot.messages.length} messages from session ${input.continuation}`);
+          } else {
+            // Missing / empty transcript — start a fresh session id so we don't
+            // keep pointing session_state at a dead file.
+            sessionId = crypto.randomUUID();
+            log(`No usable transcript for ${input.continuation}; starting fresh session ${sessionId}`);
           }
+        } else if (input.continuation) {
+          sessionId = crypto.randomUUID();
+          log(`Ignoring non-opaque continuation; starting fresh session ${sessionId}`);
         }
+
+        const persist = (): void => {
+          try {
+            saveSessionSnapshot(sessionId, agent.snapshot());
+          } catch (err) {
+            log(`Failed to persist session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        };
 
         agent.subscribe((event: AgentRuntimeEvent) => {
           if (aborted) return;
@@ -371,9 +404,10 @@ export class ClineProvider implements AgentProvider {
           }
         });
 
-        const continuation = JSON.stringify(agent.snapshot());
-        log(`Yielding init with continuation length=${continuation.length}`);
-        yield { type: 'init', continuation };
+        // Opaque id only — same contract as Claude's session_id. Persist the
+        // body to disk after each turn (SDK doesn't do it for us).
+        log(`Yielding init with session ${sessionId}`);
+        yield { type: 'init', continuation: sessionId };
 
         // ── First turn ──
         let runDone = false;
@@ -436,6 +470,9 @@ export class ClineProvider implements AgentProvider {
             };
           }
         }
+
+        // Persist after the first turn so a mid-session crash still resumes.
+        persist();
 
         // ── Follow-up turns ──
         let firstTurn = true;
@@ -516,6 +553,8 @@ export class ClineProvider implements AgentProvider {
                 };
               }
             }
+
+            persist();
           }
 
           firstTurn = false;
