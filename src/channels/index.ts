@@ -8,3 +8,4 @@
 
 import './cli.js';
 import './discord.js';
+import './local-voice.js';
