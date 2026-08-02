@@ -6,7 +6,7 @@
  * generic secret (host-pattern = base URL hostname, header-name =
  * Authorization, value-format = "Bearer {value}") so the proxy rewrites the
  * Authorization header on the wire. The container only needs:
- *   - ANTHROPIC_BASE_URL — so the SDK knows where to call
+ *   - CLINE_BASE_URL — so the SDK knows where to call
  *   - OPENCODE_GO_API_KEY=placeholder — so the SDK adds an
  *     Authorization: Bearer header for OneCLI to overwrite
  */
@@ -15,7 +15,7 @@ import { registerProviderContainerConfig } from './provider-container-registry.j
 
 registerProviderContainerConfig('cline', () => {
   const dotenv = readEnvFile([
-    'ANTHROPIC_BASE_URL',
+    'CLINE_BASE_URL',
     'CLINE_MODEL',
     'CLINE_TRANSCRIPT_MAX_TOKENS',
     'OPENCODE_MODEL',
@@ -23,8 +23,8 @@ registerProviderContainerConfig('cline', () => {
     'MOONSHOT_API_KEY',
   ]);
   const env: Record<string, string> = {};
-  if (dotenv.ANTHROPIC_BASE_URL) {
-    env.ANTHROPIC_BASE_URL = dotenv.ANTHROPIC_BASE_URL;
+  if (dotenv.CLINE_BASE_URL) {
+    env.CLINE_BASE_URL = dotenv.CLINE_BASE_URL;
     // Placeholder so the SDK adds an Authorization header; OneCLI overwrites it.
     env.OPENCODE_GO_API_KEY = 'placeholder';
   }

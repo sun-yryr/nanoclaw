@@ -22,7 +22,7 @@ export function resolveKimiFilesBaseUrl(chatBaseUrl?: string): string {
   const configured = process.env.MOONSHOT_API_BASE_URL?.trim();
   if (configured) return configured.replace(/\/$/, '');
 
-  const chat = (chatBaseUrl ?? process.env.ANTHROPIC_BASE_URL ?? '').replace(/\/$/, '');
+  const chat = (chatBaseUrl ?? process.env.CLINE_BASE_URL ?? '').replace(/\/$/, '');
   if (chat && /opencode\.ai/i.test(chat)) {
     log(`Chat base is OpenCode gateway (${chat}); using Moonshot Files API at ${DEFAULT_MOONSHOT_FILES_BASE}`);
     return DEFAULT_MOONSHOT_FILES_BASE;

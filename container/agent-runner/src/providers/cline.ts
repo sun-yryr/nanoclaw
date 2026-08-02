@@ -266,11 +266,11 @@ export class ClineProvider implements AgentProvider {
   query(input: QueryInput): AgentQuery {
     log('query() called');
     log(`ENV: OPENCODE_GO_API_KEY=${process.env.OPENCODE_GO_API_KEY ? '***' : 'undefined'}`);
-    log(`ENV: ANTHROPIC_BASE_URL=${process.env.ANTHROPIC_BASE_URL}`);
+    log(`ENV: CLINE_BASE_URL=${process.env.CLINE_BASE_URL}`);
     log(`ENV: CLINE_MODEL=${process.env.CLINE_MODEL}`);
     log(`ENV: OPENCODE_MODEL=${process.env.OPENCODE_MODEL}`);
 
-    const baseUrl = process.env.ANTHROPIC_BASE_URL || 'https://opencode.ai/zen/go/v1';
+    const baseUrl = process.env.CLINE_BASE_URL || 'https://opencode.ai/zen/go/v1';
     const modelId = process.env.CLINE_MODEL || process.env.OPENCODE_MODEL || 'opencode-go/kimi-k2.6';
     // OneCLI generic-secret proxy overwrites the Authorization header on the
     // wire, so the container only needs a placeholder value to make the SDK
