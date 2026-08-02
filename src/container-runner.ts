@@ -406,9 +406,11 @@ async function buildContainerArgs(
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
 ): Promise<string[]> {
-  console.error(
-    `[DEBUG] buildContainerArgs called, provider=${provider}, hasEnv=${!!providerContribution.env}, envKeys=${providerContribution.env ? Object.keys(providerContribution.env).join(',') : 'none'}`,
-  );
+  log.debug('buildContainerArgs called', {
+    provider,
+    hasEnv: !!providerContribution.env,
+    envKeys: providerContribution.env ? Object.keys(providerContribution.env).join(',') : 'none',
+  });
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
   // Environment — only vars read by code we don't own.
