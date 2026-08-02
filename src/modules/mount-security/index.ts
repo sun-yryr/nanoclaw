@@ -117,9 +117,11 @@ export function loadMountAllowlist(): MountAllowlist | null {
 }
 
 /**
- * Expand ~ to home directory and resolve to absolute path
+ * Expand ~ to home directory and resolve to absolute path.
+ * Returns null if the input is undefined, null, or empty.
  */
-function expandPath(p: string): string {
+function expandPath(p: string): string | null {
+  if (p == null || p === '') return null;
   const homeDir = process.env.HOME || os.homedir();
   if (p.startsWith('~/')) {
     return path.join(homeDir, p.slice(2));
@@ -171,6 +173,9 @@ function matchesBlockedPattern(realPath: string, blockedPatterns: string[]): str
 function findAllowedRoot(realPath: string, allowedRoots: AllowedRoot[]): AllowedRoot | null {
   for (const root of allowedRoots) {
     const expandedRoot = expandPath(root.path);
+    if (expandedRoot === null) {
+      continue;
+    }
     const realRoot = getRealPath(expandedRoot);
 
     if (realRoot === null) {
@@ -238,6 +243,22 @@ export function validateMount(mount: AdditionalMount): MountValidationResult {
     };
   }
 
+  // Guard against missing or empty hostPath
+  if (mount.hostPath == null || mount.hostPath === '') {
+    return {
+      allowed: false,
+      reason: `Mount entry is missing hostPath: ${JSON.stringify(mount)}`,
+    };
+  }
+
+  // Guard against non-string hostPath
+  if (typeof mount.hostPath !== 'string') {
+    return {
+      allowed: false,
+      reason: `Mount hostPath must be a string, got ${typeof mount.hostPath}: ${JSON.stringify(mount)}`,
+    };
+  }
+
   // Derive containerPath from hostPath basename if not specified
   const containerPath = mount.containerPath || path.basename(mount.hostPath);
 
@@ -251,6 +272,12 @@ export function validateMount(mount: AdditionalMount): MountValidationResult {
 
   // Expand and resolve the host path
   const expandedPath = expandPath(mount.hostPath);
+  if (expandedPath === null) {
+    return {
+      allowed: false,
+      reason: `Could not expand host path: "${mount.hostPath}"`,
+    };
+  }
   const realPath = getRealPath(expandedPath);
 
   if (realPath === null) {
@@ -276,6 +303,7 @@ export function validateMount(mount: AdditionalMount): MountValidationResult {
       allowed: false,
       reason: `Path "${realPath}" is not under any allowed root. Allowed roots: ${allowlist.allowedRoots
         .map((r) => expandPath(r.path))
+        .filter(Boolean)
         .join(', ')}`,
     };
   }
@@ -326,6 +354,13 @@ export function validateAdditionalMounts(
   }> = [];
 
   for (const mount of mounts) {
+    if (mount == null || typeof mount !== 'object') {
+      log.warn('Additional mount REJECTED — entry is not an object', {
+        group: groupName,
+        entry: String(mount),
+      });
+      continue;
+    }
     const result = validateMount(mount);
 
     if (result.allowed) {

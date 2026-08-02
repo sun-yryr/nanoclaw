@@ -47,6 +47,11 @@ export interface ContainerConfig {
 
 /** Build a `ContainerConfig` from a DB row + agent group identity. */
 export function configFromDb(row: ContainerConfigRow, group: AgentGroup): ContainerConfig {
+  const rawMounts = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
+  const additionalMounts = Array.isArray(rawMounts)
+    ? rawMounts.filter((m) => m != null && typeof m.hostPath === 'string' && m.hostPath.length > 0)
+    : [];
+
   return {
     mcpServers: JSON.parse(row.mcp_servers) as Record<string, McpServerConfig>,
     packages: {
@@ -54,7 +59,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
       npm: JSON.parse(row.packages_npm) as string[],
     },
     imageTag: row.image_tag ?? undefined,
-    additionalMounts: JSON.parse(row.additional_mounts) as AdditionalMountConfig[],
+    additionalMounts,
     skills: JSON.parse(row.skills) as string[] | 'all',
     provider: row.provider ?? undefined,
     groupName: group.name,
