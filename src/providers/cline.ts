@@ -17,6 +17,7 @@ registerProviderContainerConfig('cline', () => {
   const dotenv = readEnvFile([
     'ANTHROPIC_BASE_URL',
     'CLINE_MODEL',
+    'CLINE_TRANSCRIPT_MAX_TOKENS',
     'OPENCODE_MODEL',
     'MOONSHOT_API_BASE_URL',
     'MOONSHOT_API_KEY',
@@ -29,6 +30,9 @@ registerProviderContainerConfig('cline', () => {
   }
   if (dotenv.CLINE_MODEL) {
     env.CLINE_MODEL = dotenv.CLINE_MODEL;
+  }
+  if (dotenv.CLINE_TRANSCRIPT_MAX_TOKENS) {
+    env.CLINE_TRANSCRIPT_MAX_TOKENS = dotenv.CLINE_TRANSCRIPT_MAX_TOKENS;
   }
   if (dotenv.OPENCODE_MODEL) {
     env.OPENCODE_MODEL = dotenv.OPENCODE_MODEL;

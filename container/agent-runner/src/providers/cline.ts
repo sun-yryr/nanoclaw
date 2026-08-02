@@ -11,6 +11,7 @@ import {
   loadSessionSnapshot,
   maybeRotateClineContinuation,
   saveSessionSnapshot,
+  trimClineSnapshotToHistoryBudget,
 } from './cline-sessions.js';
 import { resolveComposedClaudeMd } from '../claude-md-resolve.js';
 import { registerProvider } from './provider-registry.js';
@@ -349,7 +350,15 @@ export class ClineProvider implements AgentProvider {
 
         const persist = (): void => {
           try {
-            saveSessionSnapshot(sessionId, agent.snapshot());
+            const snapshot = agent.snapshot();
+            const { removed, maxTokens } = trimClineSnapshotToHistoryBudget(snapshot);
+            saveSessionSnapshot(sessionId, snapshot);
+            if (removed > 0) {
+              agent.restore(snapshot.messages);
+              log(
+                `Trimmed ${removed} old messages from the active session to stay within the ${maxTokens.toLocaleString()}-token history budget`,
+              );
+            }
           } catch (err) {
             log(`Failed to persist session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
           }

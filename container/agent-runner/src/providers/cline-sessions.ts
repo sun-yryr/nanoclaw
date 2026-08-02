@@ -40,6 +40,60 @@ function transcriptRotateBytes(): number {
   return Number(process.env.CLINE_TRANSCRIPT_ROTATE_BYTES) || 12 * 1024 * 1024;
 }
 
+const DEFAULT_TRANSCRIPT_MAX_TOKENS = 64 * 1024;
+
+function transcriptMaxTokens(): number {
+  const raw = process.env.CLINE_TRANSCRIPT_MAX_TOKENS;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_TRANSCRIPT_MAX_TOKENS;
+  const tokens = Number(raw);
+  if (!Number.isFinite(tokens) || tokens <= 0) return DEFAULT_TRANSCRIPT_MAX_TOKENS;
+  return Math.floor(tokens);
+}
+
+/**
+ * A conservative tokenizer-free estimate that works reasonably across English
+ * and multibyte text. JSON overhead is included because it also contributes to
+ * the provider request.
+ */
+function estimateMessageTokens(message: unknown): number {
+  return Math.ceil(Buffer.byteLength(JSON.stringify(message), 'utf-8') / 3);
+}
+
+function trimSnapshotMessages(snapshot: AgentRuntimeStateSnapshot, maxTokens: number): number {
+  if (!Array.isArray(snapshot.messages) || snapshot.messages.length === 0) return 0;
+
+  let estimatedTokens = 0;
+  let start = snapshot.messages.length;
+  for (let i = snapshot.messages.length - 1; i >= 0; i--) {
+    const messageTokens = estimateMessageTokens(snapshot.messages[i]);
+    if (estimatedTokens + messageTokens > maxTokens) break;
+    estimatedTokens += messageTokens;
+    start = i;
+  }
+
+  if (start === 0) return 0;
+
+  // A tool result or assistant message cannot safely begin a restored
+  // conversation. Advance to the first complete user turn in the retained
+  // suffix, or clear the transcript if no complete turn fits.
+  while (start < snapshot.messages.length && snapshot.messages[start]?.role !== 'user') {
+    start++;
+  }
+
+  const removed = start;
+  snapshot.messages = snapshot.messages.slice(start);
+  snapshot.pendingToolCalls = [];
+  return removed;
+}
+
+export function trimClineSnapshotToHistoryBudget(snapshot: AgentRuntimeStateSnapshot): {
+  removed: number;
+  maxTokens: number;
+} {
+  const maxTokens = transcriptMaxTokens();
+  return { removed: trimSnapshotMessages(snapshot, maxTokens), maxTokens };
+}
+
 function transcriptRotateAgeMs(): number {
   const raw = process.env.CLINE_TRANSCRIPT_ROTATE_AGE_DAYS;
   if (raw === undefined || raw.trim() === '') return 14 * 86_400_000;
@@ -97,6 +151,17 @@ export function maybeRotateClineContinuation(continuation: string): string | nul
     // Missing file: let query start fresh (init will overwrite the id). Don't
     // treat as rotate-with-archive — there's nothing to archive.
     return 'missing transcript file';
+  }
+
+  const snapshot = loadSessionSnapshot(continuation);
+  if (!snapshot) return 'unreadable transcript file';
+
+  const { removed, maxTokens } = trimClineSnapshotToHistoryBudget(snapshot);
+  if (removed > 0) {
+    saveSessionSnapshot(continuation, snapshot);
+    log(
+      `Trimmed ${removed} old messages from ${continuation} to stay within the ${maxTokens.toLocaleString()}-token history budget`,
+    );
   }
 
   let size: number;

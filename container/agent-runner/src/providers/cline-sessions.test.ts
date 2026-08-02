@@ -10,6 +10,7 @@ import {
   maybeRotateClineContinuation,
   saveSessionSnapshot,
   sessionTranscriptPath,
+  trimClineSnapshotToHistoryBudget,
 } from './cline-sessions.js';
 
 describe('cline-sessions', () => {
@@ -17,15 +18,18 @@ describe('cline-sessions', () => {
   let prevConfigDir: string | undefined;
   let prevRotateBytes: string | undefined;
   let prevRotateAge: string | undefined;
+  let prevMaxTokens: string | undefined;
 
   beforeEach(() => {
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cline-sessions-'));
     prevConfigDir = process.env.CLAUDE_CONFIG_DIR;
     prevRotateBytes = process.env.CLINE_TRANSCRIPT_ROTATE_BYTES;
     prevRotateAge = process.env.CLINE_TRANSCRIPT_ROTATE_AGE_DAYS;
+    prevMaxTokens = process.env.CLINE_TRANSCRIPT_MAX_TOKENS;
     process.env.CLAUDE_CONFIG_DIR = path.join(tmpHome, '.claude');
     delete process.env.CLINE_TRANSCRIPT_ROTATE_BYTES;
     delete process.env.CLINE_TRANSCRIPT_ROTATE_AGE_DAYS;
+    delete process.env.CLINE_TRANSCRIPT_MAX_TOKENS;
   });
 
   afterEach(() => {
@@ -35,6 +39,8 @@ describe('cline-sessions', () => {
     else process.env.CLINE_TRANSCRIPT_ROTATE_BYTES = prevRotateBytes;
     if (prevRotateAge === undefined) delete process.env.CLINE_TRANSCRIPT_ROTATE_AGE_DAYS;
     else process.env.CLINE_TRANSCRIPT_ROTATE_AGE_DAYS = prevRotateAge;
+    if (prevMaxTokens === undefined) delete process.env.CLINE_TRANSCRIPT_MAX_TOKENS;
+    else process.env.CLINE_TRANSCRIPT_MAX_TOKENS = prevMaxTokens;
     fs.rmSync(tmpHome, { recursive: true, force: true });
   });
 
@@ -43,6 +49,11 @@ describe('cline-sessions', () => {
     expect(isOpaqueSessionId('{"messages":[]}')).toBe(false);
     expect(isLegacyInlineContinuation('{"agentId":"x","messages":[]}')).toBe(true);
     expect(isLegacyInlineContinuation('a1b2c3d4-e5f6-7890-abcd-ef1234567890')).toBe(false);
+  });
+
+  it('defaults the conversation history budget to 64K tokens', () => {
+    const result = trimClineSnapshotToHistoryBudget({ messages: [] } as never);
+    expect(result).toEqual({ removed: 0, maxTokens: 64 * 1024 });
   });
 
   it('round-trips a snapshot to disk', () => {
@@ -107,5 +118,32 @@ describe('cline-sessions', () => {
 
     expect(maybeRotateClineContinuation(id)).toBeNull();
     expect(loadSessionSnapshot(id)?.messages).toHaveLength(1);
+  });
+
+  it('trims oldest messages to the configured token budget at a user boundary', () => {
+    process.env.CLINE_TRANSCRIPT_MAX_TOKENS = '60';
+    const id = '22222222-3333-4444-5555-666666666666';
+    saveSessionSnapshot(id, {
+      agentId: 'a',
+      status: 'idle',
+      iteration: 0,
+      messages: [
+        { role: 'user', content: 'x'.repeat(180) },
+        { role: 'assistant', content: 'y'.repeat(180) },
+        { role: 'tool', content: 'stale tool result' },
+        { role: 'user', content: 'latest question' },
+        { role: 'assistant', content: 'latest answer' },
+      ],
+      pendingToolCalls: [{ id: 'stale' }],
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    } as never);
+
+    expect(maybeRotateClineContinuation(id)).toBeNull();
+    const loaded = loadSessionSnapshot(id);
+    expect(loaded?.messages).toEqual([
+      { role: 'user', content: 'latest question' },
+      { role: 'assistant', content: 'latest answer' },
+    ]);
+    expect(loaded?.pendingToolCalls).toEqual([]);
   });
 });
