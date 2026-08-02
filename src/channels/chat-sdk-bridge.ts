@@ -129,6 +129,16 @@ export function splitForLimit(text: string, limit: number): string[] {
   return chunks;
 }
 
+/**
+ * Detect composite message IDs like "snowflake:ag-{timestamp}-{random}"
+ * produced by messageIdForAgent(). These should have been stripped by
+ * getMessageIdBySeq() on the container side — if one reaches delivery
+ * it's a bug and will cause platform API errors.
+ */
+function isCompositeAgentId(id: string): boolean {
+  return id.includes(':ag-');
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   // The instance name becomes a webhook route segment (the route regex is
@@ -407,14 +417,28 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       const content = message.content as Record<string, unknown>;
 
       if (content.operation === 'edit' && content.messageId) {
-        await adapter.editMessage(tid, content.messageId as string, {
+        const msgId = content.messageId as string;
+        if (isCompositeAgentId(msgId)) {
+          log.error('edit_message: composite message ID not stripped — dropping to prevent retry loop', {
+            messageId: msgId,
+          });
+          return;
+        }
+        await adapter.editMessage(tid, msgId, {
           markdown: transformText((content.text as string) || (content.markdown as string) || ''),
         });
         return;
       }
 
       if (content.operation === 'reaction' && content.messageId && content.emoji) {
-        await adapter.addReaction(tid, content.messageId as string, content.emoji as string);
+        const msgId = content.messageId as string;
+        if (isCompositeAgentId(msgId)) {
+          log.error('add_reaction: composite message ID not stripped — dropping to prevent retry loop', {
+            messageId: msgId,
+          });
+          return;
+        }
+        await adapter.addReaction(tid, msgId, content.emoji as string);
         return;
       }
 

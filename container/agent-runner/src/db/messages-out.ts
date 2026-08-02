@@ -80,8 +80,10 @@ export function writeMessageOut(msg: WriteMessageOut): number {
  * Look up a message's platform ID by seq number.
  * Searches both inbound and outbound DBs since seq spans both.
  *
- * For inbound messages, the Chat SDK message ID is already the platform message ID
- * (e.g., "6037840640:42" for Telegram).
+ * For inbound messages, messages_in.id is namespaced by the router as
+ * "<platformMessageId>:<agentGroupId>" (e.g. "6037840640:42:ag-123-abc" for
+ * Telegram, "1526225873672605727:ag-456-def" for Discord). Strip the suffix
+ * to recover the original platform message ID.
  *
  * For outbound messages, the internal ID (msg-xxx) won't work for edits/reactions.
  * Instead, look up the platform_message_id from the delivered table (host writes this
@@ -90,11 +92,17 @@ export function writeMessageOut(msg: WriteMessageOut): number {
 export function getMessageIdBySeq(seq: number): string | null {
   const inbound = getInboundDb();
 
-  // Inbound messages: ID is already the platform message ID
+  // Inbound messages: strip the agent_group_id suffix added by messageIdForAgent().
+  // Agent group IDs always start with "ag-" and contain no internal colons,
+  // so splitting at ":ag-" reliably recovers the original platform message ID
+  // even when it already contains colons (e.g. Telegram "6037840640:42").
   const inRow = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(seq) as
     | { id: string }
     | undefined;
-  if (inRow) return inRow.id;
+  if (inRow) {
+    const agIdx = inRow.id.indexOf(':ag-');
+    return agIdx > 0 ? inRow.id.slice(0, agIdx) : inRow.id;
+  }
 
   // Outbound messages: look up platform message ID from delivered table
   const outRow = getOutboundDb().prepare('SELECT id FROM messages_out WHERE seq = ?').get(seq) as
