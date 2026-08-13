@@ -8,11 +8,10 @@
  *   1. Gather all existing agent groups.
  *   2. Pick an eligible approver (owner / admin) and a reachable DM for
  *      them, reusing the same primitives the sender-approval flow uses.
- *   3. Deliver a card with three action families:
+ *   3. Deliver a card with:
  *        a. Connect to [agent] — one button per existing agent group.
  *           Single-agent installs get a one-click connect.
- *        b. Connect new agent — prompts for a free-text name, creates
- *           the agent immediately on reply.
+ *        b. Connect new agent — only when ALLOW_MULTIPLE_AGENT_GROUPS=true.
  *        c. Reject — deny the channel.
  *   4. Record a `pending_channel_approvals` row holding the original event
  *      so it can be re-routed on connect/create.
@@ -51,6 +50,7 @@ import { getMessagingGroup, updateMessagingGroup } from '../../db/messaging-grou
 import { getDeliveryAdapter } from '../../delivery.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import { log } from '../../log.js';
+import { allowMultipleAgentGroups, assertCanCreateAgentGroup } from '../../single-agent.js';
 import type { InboundEvent } from '../../channels/adapter.js';
 import type { AgentGroup } from '../../types.js';
 import { pickApprovalDelivery, pickApprover } from '../approvals/primitive.js';
@@ -101,11 +101,13 @@ function buildApprovalOptions(agentGroups: AgentGroup[], approverUserId?: string
       value: CHOOSE_EXISTING_VALUE,
     });
   }
-  options.push({
-    label: 'Connect new agent',
-    selectedLabel: '🆕 Connecting new agent…',
-    value: NEW_AGENT_VALUE,
-  });
+  if (allowMultipleAgentGroups()) {
+    options.push({
+      label: 'Connect new agent',
+      selectedLabel: '🆕 Connecting new agent…',
+      value: NEW_AGENT_VALUE,
+    });
+  }
   options.push({
     label: 'Reject',
     selectedLabel: '🙅 Rejected',
@@ -274,6 +276,7 @@ export function buildAgentSelectionOptions(
  * folder-name collisions with numeric suffixes.
  */
 export function createNewAgentGroup(name: string): AgentGroup {
+  assertCanCreateAgentGroup();
   let folder = toFolder(name);
   const baseFolder = folder;
   let suffix = 2;

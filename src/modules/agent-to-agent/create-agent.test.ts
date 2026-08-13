@@ -56,12 +56,17 @@ import { handleCreateAgent } from './create-agent.js';
 
 const SESSION = { id: 'sess-1', agent_group_id: 'ag-1' } as Session;
 
+const prevMultiple = process.env.ALLOW_MULTIPLE_AGENT_GROUPS;
+
 beforeEach(() => {
   vi.clearAllMocks();
+  process.env.ALLOW_MULTIPLE_AGENT_GROUPS = 'true';
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
+  if (prevMultiple === undefined) delete process.env.ALLOW_MULTIPLE_AGENT_GROUPS;
+  else process.env.ALLOW_MULTIPLE_AGENT_GROUPS = prevMultiple;
 });
 
 describe('handleCreateAgent — scope-based authorization', () => {
@@ -111,5 +116,20 @@ describe('handleCreateAgent — scope-based authorization', () => {
 
     expect(mockRequestApproval).not.toHaveBeenCalled();
     expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+  });
+
+  it('single-agent mode: notifies and does not create even with global scope', async () => {
+    delete process.env.ALLOW_MULTIPLE_AGENT_GROUPS;
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+
+    await handleCreateAgent({ name: 'Scout', instructions: 'help' }, SESSION);
+
+    expect(mockRequestApproval).not.toHaveBeenCalled();
+    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+    expect(mockNotifyWrite).toHaveBeenCalled();
+    const content = JSON.parse((mockNotifyWrite.mock.calls[0][2] as { content: string }).content) as {
+      text: string;
+    };
+    expect(content.text).toMatch(/single agent group/);
   });
 });

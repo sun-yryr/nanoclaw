@@ -32,6 +32,7 @@ import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
+import { effectiveSessionMode } from './single-agent.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
 
@@ -426,16 +427,16 @@ async function deliverToAgent(
   adapterSupportsThreads: boolean,
   wake: boolean,
 ): Promise<void> {
-  // Apply the adapter thread policy: threaded adapter in a group chat →
-  // per-thread session regardless of wiring. agent-shared preserved (it's
-  // a cross-channel directive the adapter doesn't know about). DMs collapse
-  // sub-threads to one session (is_group=0 short-circuit).
-  let effectiveSessionMode = agent.session_mode;
-  if (adapterSupportsThreads && effectiveSessionMode !== 'agent-shared' && mg.is_group !== 0) {
-    effectiveSessionMode = 'per-thread';
-  }
+  // Honour wiring session_mode. The old "threaded group chat → always
+  // per-thread" override is opt-in via FORCE_PER_THREAD_IN_GROUP_CHATS.
+  // agent-shared is never overridden. DMs collapse sub-threads via
+  // is_group=0 (effectiveSessionMode stays `shared`).
+  const mode = effectiveSessionMode(agent.session_mode, {
+    adapterSupportsThreads,
+    isGroup: mg.is_group !== 0,
+  });
 
-  const { session, created } = resolveSession(agent.agent_group_id, mg.id, event.threadId, effectiveSessionMode);
+  const { session, created } = resolveSession(agent.agent_group_id, mg.id, event.threadId, mode);
 
   // The inbound row's (channel_type, platform_id, thread_id) is the address
   // the agent's reply will be delivered to. Normally it mirrors the source

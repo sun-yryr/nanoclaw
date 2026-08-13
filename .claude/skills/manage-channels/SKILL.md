@@ -47,13 +47,13 @@ For each unwired channel:
 
 ### Isolation Question
 
-Present a multiple-choice with a contextual recommendation. The three options:
+Present a multiple-choice with a contextual recommendation. This install is **single-agent** by default (`docs/single-agent-unification.md`): wire to the existing folder. Creating a separate agent requires `ALLOW_MULTIPLE_AGENT_GROUPS=true`.
 
 - **Same conversation** (`--session-mode "agent-shared"` + existing folder) — all messages land in one session. Recommend for webhook + chat combos (GitHub + Slack).
-- **Same agent, separate conversations** (`--session-mode "shared"` + existing folder) — shared workspace/memory, independent threads. Recommend for same user across platforms.
-- **Separate agent** (new `--folder`) — full isolation. Recommend when different people are involved.
+- **Same agent, separate conversations** (`--session-mode "shared"` + existing folder) — shared workspace/memory, independent threads. **Default for this fork.** Recommend for the same user across platforms.
+- **Separate agent** (new `--folder`) — full isolation. Only when `ALLOW_MULTIPLE_AGENT_GROUPS=true` and different people are involved.
 
-Use the channel's `typical-use` and `default-isolation` fields to pick the recommendation. Offer to explain more if the user is unsure — reference `docs/isolation-model.md` for the detailed explanation.
+Use the channel's `typical-use` field. Prefer the existing agent group from `ncl groups list` as `--folder`. Do not create a new folder unless the user explicitly wants isolation and the override env is set.
 
 ### Register Command
 
@@ -65,9 +65,9 @@ pnpm exec tsx setup/index.ts --step register -- \
   --assistant-name "<name>"
 ```
 
-The `register` step creates the agent group (reusing it if the folder already exists), the messaging group, and the wiring row. `createMessagingGroupAgent` auto-creates the companion `agent_destinations` row so the agent can address the channel by name.
+The `register` step reuses the existing agent group in single-agent mode (even if `--folder` is new), creates the messaging group, and the wiring row. `createMessagingGroupAgent` auto-creates the companion `agent_destinations` row so the agent can address the channel by name.
 
-For separate agents, also ask for a folder name and optionally a different assistant name.
+For separate agents (`ALLOW_MULTIPLE_AGENT_GROUPS=true`), also ask for a folder name and optionally a different assistant name.
 
 ## Add Channel Group
 

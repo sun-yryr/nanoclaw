@@ -1,6 +1,12 @@
 # 1エージェント統合 — 方針とメリデメ
 
-このフォークのペルソナは「真冬」一人の生活パートナーである。一方でランタイムは **agent group / session / container / provider** が別物として動くため、会話するたびに「別の agent が起きている」ように見える。このメモは、どこまでを1つにまとめるか、まとめると何が簡単になり何が難しくなるかを整理する。実装には入らない。
+このフォークのペルソナは「真冬」一人の生活パートナーである。一方でランタイムは **agent group / session / container / provider** が別物として動くため、会話するたびに「別の agent が起きている」ように見える。このメモは、どこまでを1つにまとめるか、まとめると何が簡単になり何が難しくなるかを整理する。
+
+**実装済み:** A（配線を1 group に寄せる）と B（新規 group を作らない）。C / D はやらない。
+
+- 既存の複数 group を寄せる: `pnpm exec tsx scripts/consolidate-agent-groups.ts [--keep <id-or-folder>] [--dry-run]`
+- 新規作成を許可するときだけ: `ALLOW_MULTIPLE_AGENT_GROUPS=true`
+- Discord スレッドを会話単位に戻すときだけ: `FORCE_PER_THREAD_IN_GROUP_CHATS=true`
 
 関連: [isolation-model.md](isolation-model.md)、[architecture.md](architecture.md)、[db.md](db.md)。
 
@@ -205,11 +211,11 @@ v1 の `registered_groups` に戻る方向で、v2 が意図して分けた many
 
 ## 推奨する進め方
 
-このフォーク向け。
+このフォーク向け。**A と B は実装済み。**
 
-1. **今すぐ（A）** — 実 DB を見て agent group を1つに寄せ、全チャネルを `session_mode=shared` で配線する。音声チャネルも同じ group にする。
-2. **次（B）** — 新規 group 作成経路を塞ぐ。Discord の per-thread 強制を個人用途では切る。これで「いつの間にか別 agent」が止まる。
-3. **C は計測してから** — `MAX_CONCURRENT_CONTAINERS` に当たる、同時に何本も Docker が起きてホストが重い、restart が session 数だけ走る、が実際に痛いときだけ。先にキューイング（同時1会話、他は待つ）で十分かも知れない。並行マルチ query は最後。
+1. **A** — `pnpm exec tsx scripts/consolidate-agent-groups.ts [--keep <id-or-folder>] [--dry-run]` で実 DB の配線を1 group + `session_mode=shared` に寄せる。余った group は確認してから `ncl groups delete`。
+2. **B** — register / init-first-agent / チャネル承認 / `create_agent` / `ncl groups create` は既存 group を再利用するか拒否する。Discord の per-thread 強制は切ってある（`FORCE_PER_THREAD_IN_GROUP_CHATS=true` で旧動作）。
+3. **C は計測してから** — 同時 Docker 本数が実際に痛いときだけ。
 4. **D はやらない。**
 
 C に進むときの最低条件（設計を変えないと壊れる不変条件）:

@@ -4,6 +4,7 @@ import { restartAgentGroupContainers } from '../../container-restart.js';
 import { getDb, hasTable } from '../../db/connection.js';
 import { getSession } from '../../db/sessions.js';
 import { writeSessionMessage } from '../../session-manager.js';
+import { assertCanCreateAgentGroup } from '../../single-agent.js';
 import {
   getContainerConfig,
   updateContainerConfigScalars,
@@ -62,6 +63,7 @@ registerResource({
   // DELETE violates FK constraints (see #2525). The cascading handler is
   // provided as `customOperations.delete` below.
   operations: { list: 'open', get: 'open', create: 'approval', update: 'approval' },
+  createGuard: () => assertCanCreateAgentGroup(),
   customOperations: {
     delete: {
       access: 'approval',

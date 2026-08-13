@@ -217,4 +217,14 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
     expect((resp as { ok: false; error: { code: string; message: string } }).error.code).toBe('handler-error');
     expect((resp as { ok: false; error: { code: string; message: string } }).error.message).toMatch(/not found/i);
   });
+
+  it('refuses groups-create when an agent group already exists', async () => {
+    createAgentGroup({ id: 'ag-keep', name: 'keep', folder: 'keep', agent_provider: null, created_at: now() });
+    const resp = await dispatch(
+      { id: 'req-create', command: 'groups-create', args: { name: 'another', folder: 'another' } },
+      { caller: 'host' },
+    );
+    expect(resp.ok).toBe(false);
+    expect((resp as { ok: false; error: { message: string } }).error.message).toMatch(/single-agent/);
+  });
 });

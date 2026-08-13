@@ -10,7 +10,6 @@ import path from 'path';
 import { DATA_DIR } from '../src/config.js';
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
-import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import {
   createMessagingGroup,
   createMessagingGroupAgent,
@@ -22,6 +21,7 @@ import { initGroupFilesystem } from '../src/group-init.js';
 import { log } from '../src/log.js';
 import { namespacedPlatformId } from '../src/platform-id.js';
 import { resolveSession, writeSessionMessage } from '../src/session-manager.js';
+import { resolveOrCreateAgentGroup } from '../src/single-agent.js';
 import { emitStatus } from './status.js';
 
 interface RegisterArgs {
@@ -126,19 +126,16 @@ export async function run(args: string[]): Promise<void> {
   const db = initDb(dbPath);
   runMigrations(db);
 
-  // 1. Create or find agent group
-  let agentGroup = getAgentGroupByFolder(parsed.folder);
-  if (!agentGroup) {
-    const agId = generateId('ag');
-    createAgentGroup({
-      id: agId,
-      name: parsed.assistantName,
-      folder: parsed.folder,
-      agent_provider: null,
-      created_at: new Date().toISOString(),
-    });
-    agentGroup = getAgentGroupByFolder(parsed.folder)!;
-    log.info('Created agent group', { id: agId, folder: parsed.folder });
+  // 1. Create or find agent group. Single-agent mode reuses the existing
+  // group when --folder would otherwise create a second one.
+  const { group: agentGroup, created } = resolveOrCreateAgentGroup({
+    folder: parsed.folder,
+    name: parsed.assistantName,
+  });
+  if (created) {
+    log.info('Created agent group', { id: agentGroup.id, folder: agentGroup.folder });
+  } else {
+    log.info('Reusing agent group', { id: agentGroup.id, folder: agentGroup.folder });
   }
   initGroupFilesystem(agentGroup);
 
@@ -230,7 +227,7 @@ export async function run(args: string[]): Promise<void> {
   // `groups/<folder>/CLAUDE.md`.
   let nameUpdated = false;
   if (parsed.assistantName !== 'Andy') {
-    const mdFile = path.join(projectRoot, 'groups', parsed.folder, 'CLAUDE.md');
+    const mdFile = path.join(projectRoot, 'groups', agentGroup.folder, 'CLAUDE.md');
     if (fs.existsSync(mdFile)) {
       const before = fs.readFileSync(mdFile, 'utf-8');
       const after = before
@@ -250,7 +247,7 @@ export async function run(args: string[]): Promise<void> {
   emitStatus('REGISTER_CHANNEL', {
     PLATFORM_ID: parsed.platformId,
     NAME: parsed.name,
-    FOLDER: parsed.folder,
+    FOLDER: agentGroup.folder,
     CHANNEL: parsed.channel,
     TRIGGER: parsed.trigger,
     REQUIRES_TRIGGER: parsed.requiresTrigger,

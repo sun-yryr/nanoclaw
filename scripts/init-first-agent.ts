@@ -1,7 +1,8 @@
 /**
  * Init the first (or Nth) NanoClaw v2 agent for a DM channel.
  *
- * Wires a real DM channel (discord, telegram, etc.) to a new agent group,
+ * Wires a real DM channel (discord, telegram, etc.) to an agent group
+ * (reuses the existing one in single-agent mode),
  * then hands a welcome message to the running service via the CLI socket
  * (admin transport). The service routes that message into the DM session,
  * which wakes the container synchronously — the agent processes the welcome
@@ -34,7 +35,6 @@ import net from 'net';
 import path from 'path';
 
 import { DATA_DIR } from '../src/config.js';
-import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import { initDb } from '../src/db/connection.js';
 import {
   createMessagingGroup,
@@ -50,6 +50,7 @@ import { upsertUser } from '../src/modules/permissions/db/users.js';
 import { updateContainerConfigScalars } from '../src/db/container-configs.js';
 import { initGroupFilesystem } from '../src/group-init.js';
 import { namespacedPlatformId } from '../src/platform-id.js';
+import { resolveOrCreateAgentGroup } from '../src/single-agent.js';
 import type { AgentGroup, MessagingGroup } from '../src/types.js';
 
 type Role = 'owner' | 'admin' | 'member';
@@ -64,8 +65,7 @@ interface Args {
   role: Role;
 }
 
-const DEFAULT_WELCOME =
-  'System instruction: run /welcome to introduce yourself to the user on this new channel.';
+const DEFAULT_WELCOME = 'System instruction: run /welcome to introduce yourself to the user on this new channel.';
 
 const DEFAULT_ROLE: Role = 'owner';
 
@@ -102,9 +102,7 @@ function parseArgs(argv: string[]): Args {
       case '--role': {
         const raw = (val ?? '').toLowerCase();
         if (raw !== 'owner' && raw !== 'admin' && raw !== 'member') {
-          console.error(
-            `Invalid --role: ${raw} (expected 'owner', 'admin', or 'member')`,
-          );
+          console.error(`Invalid --role: ${raw} (expected 'owner', 'admin', or 'member')`);
           process.exit(2);
         }
         out.role = raw;
@@ -187,22 +185,18 @@ async function main(): Promise<void> {
   // Owner grant is deferred until after the agent group is resolved, since
   // an admin grant is scoped to that group. See step 2b.
 
-  // 2. Agent group + filesystem.
+  // 2. Agent group + filesystem. Single-agent mode reuses the existing
+  // group instead of creating dm-with-<name> as a second identity.
   const folder = `dm-with-${normalizeName(args.displayName)}`;
-  let ag: AgentGroup | undefined = getAgentGroupByFolder(folder);
-  if (!ag) {
-    const agId = generateId('ag');
-    createAgentGroup({
-      id: agId,
-      name: args.agentName,
-      folder,
-      agent_provider: null,
-      created_at: now,
-    });
-    ag = getAgentGroupByFolder(folder)!;
-    console.log(`Created agent group: ${ag.id} (${folder})`);
+  const { group: ag, created } = resolveOrCreateAgentGroup({
+    folder,
+    name: args.agentName,
+    now,
+  });
+  if (created) {
+    console.log(`Created agent group: ${ag.id} (${ag.folder})`);
   } else {
-    console.log(`Reusing agent group: ${ag.id} (${folder})`);
+    console.log(`Reusing agent group: ${ag.id} (${ag.folder})`);
   }
   initGroupFilesystem(ag, {
     instructions:
@@ -220,9 +214,7 @@ async function main(): Promise<void> {
   // getUserRoles prevents duplicates on re-runs.
   const existingRoles = getUserRoles(userId);
   if (args.role === 'owner') {
-    const alreadyOwner = existingRoles.some(
-      (r) => r.role === 'owner' && r.agent_group_id === null,
-    );
+    const alreadyOwner = existingRoles.some((r) => r.role === 'owner' && r.agent_group_id === null);
     if (!alreadyOwner) {
       grantRole({
         user_id: userId,
@@ -235,9 +227,7 @@ async function main(): Promise<void> {
     // Owner's agent group gets global CLI access
     updateContainerConfigScalars(ag.id, { cli_scope: 'global' });
   } else if (args.role === 'admin') {
-    const alreadyAdmin = existingRoles.some(
-      (r) => r.role === 'admin' && r.agent_group_id === ag.id,
-    );
+    const alreadyAdmin = existingRoles.some((r) => r.role === 'admin' && r.agent_group_id === ag.id);
     if (!alreadyAdmin) {
       grantRole({
         user_id: userId,
@@ -293,17 +283,13 @@ async function main(): Promise<void> {
   });
 
   const roleLabel =
-    args.role === 'owner'
-      ? 'owner (global)'
-      : args.role === 'admin'
-        ? `admin (scoped to ${ag.id})`
-        : 'member';
+    args.role === 'owner' ? 'owner (global)' : args.role === 'admin' ? `admin (scoped to ${ag.id})` : 'member';
 
   console.log('');
   console.log('Init complete.');
   console.log(`  user:    ${userId}`);
   console.log(`  role:    ${roleLabel}`);
-  console.log(`  agent:   ${ag.name} [${ag.id}] @ groups/${folder}`);
+  console.log(`  agent:   ${ag.name} [${ag.id}] @ groups/${ag.folder}`);
   console.log(`  channel: ${args.channel} ${dmMg.platform_id}`);
   console.log('');
   console.log('Welcome DM queued — the agent will greet you shortly.');
@@ -342,11 +328,7 @@ async function sendWelcomeViaCliSocket(
     };
 
     socket.once('error', (err) =>
-      settle(
-        new Error(
-          `CLI socket at ${sockPath} not reachable: ${err.message}. Is the NanoClaw service running?`,
-        ),
-      ),
+      settle(new Error(`CLI socket at ${sockPath} not reachable: ${err.message}. Is the NanoClaw service running?`)),
     );
     socket.once('connect', () => {
       const payload =
