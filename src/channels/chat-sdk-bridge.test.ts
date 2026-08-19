@@ -372,8 +372,9 @@ describe('createChatSdkBridge.deliver — transformOutboundText', () => {
     const edits: Array<{ markdown: string }> = [];
     const bridge = createChatSdkBridge({
       adapter: stubAdapter({
-        editMessage: async (_threadId, _messageId, content: { markdown: string }) => {
-          edits.push(content);
+        editMessage: async (_threadId, _messageId, content) => {
+          edits.push({ markdown: (content as { markdown: string }).markdown });
+          return { id: 'msg-stub', threadId: _threadId, raw: {} };
         },
       }),
       supportsThreads: false,
