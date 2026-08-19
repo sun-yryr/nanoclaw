@@ -20,7 +20,6 @@
 import path from 'path';
 
 import { DATA_DIR } from '../src/config.js';
-import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import { initDb } from '../src/db/connection.js';
 import {
   createMessagingGroup,
@@ -32,7 +31,8 @@ import { runMigrations } from '../src/db/migrations/index.js';
 import { normalizeName } from '../src/modules/agent-to-agent/db/agent-destinations.js';
 import { upsertUser } from '../src/modules/permissions/db/users.js';
 import { initGroupFilesystem } from '../src/group-init.js';
-import type { AgentGroup, MessagingGroup } from '../src/types.js';
+import { resolveOrCreateAgentGroup } from '../src/single-agent.js';
+import type { MessagingGroup } from '../src/types.js';
 
 const CLI_CHANNEL = 'cli';
 const CLI_PLATFORM_ID = 'local';
@@ -100,22 +100,17 @@ async function main(): Promise<void> {
   // wired — cli:local is a scratch identity, not the operator.
   const promotedToOwner = false;
 
-  // 2. Agent group + filesystem.
+  // 2. Agent group + filesystem. Single-agent mode reuses the existing group.
   const folder = args.folder || `cli-with-${normalizeName(args.displayName)}`;
-  let ag: AgentGroup | undefined = getAgentGroupByFolder(folder);
-  if (!ag) {
-    const agId = generateId('ag');
-    createAgentGroup({
-      id: agId,
-      name: args.agentName,
-      folder,
-      agent_provider: null,
-      created_at: now,
-    });
-    ag = getAgentGroupByFolder(folder)!;
-    console.log(`Created agent group: ${ag.id} (${folder})`);
+  const { group: ag, created } = resolveOrCreateAgentGroup({
+    folder,
+    name: args.agentName,
+    now,
+  });
+  if (created) {
+    console.log(`Created agent group: ${ag.id} (${ag.folder})`);
   } else {
-    console.log(`Reusing agent group: ${ag.id} (${folder})`);
+    console.log(`Reusing agent group: ${ag.id} (${ag.folder})`);
   }
   initGroupFilesystem(ag, {
     instructions:
@@ -161,9 +156,7 @@ async function main(): Promise<void> {
 
   console.log('');
   console.log('Init complete.');
-  console.log(
-    `  owner:   ${CLI_SYNTHETIC_USER_ID}${promotedToOwner ? ' (promoted on first owner)' : ''}`,
-  );
+  console.log(`  owner:   ${CLI_SYNTHETIC_USER_ID}${promotedToOwner ? ' (promoted on first owner)' : ''}`);
   console.log(`  agent:   ${ag.name} [${ag.id}] @ groups/${folder}`);
   console.log(`  channel: cli/${CLI_PLATFORM_ID}`);
   console.log('');

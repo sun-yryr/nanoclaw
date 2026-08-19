@@ -153,10 +153,12 @@ describe('unknown-channel registration flow', () => {
     expect(kind).toBe('chat-sdk');
     const payload = JSON.parse(content as string);
     expect(payload.type).toBe('ask_question');
-    // Single-agent card offers a direct "Connect to <name>" button.
+    // Single-agent card offers a direct "Connect to <name>" button and no
+    // "Connect new agent" (ALLOW_MULTIPLE_AGENT_GROUPS is off by default).
     const connectOption = payload.options.find((o: { value: string }) => o.value.startsWith('connect:'));
     expect(connectOption).toBeDefined();
     expect(connectOption.label).toContain('Andy');
+    expect(payload.options.map((o: { value: string }) => o.value)).not.toContain('new_agent');
 
     const { getDb } = await import('../../db/connection.js');
     const rows = getDb().prepare('SELECT * FROM pending_channel_approvals').all() as Array<{

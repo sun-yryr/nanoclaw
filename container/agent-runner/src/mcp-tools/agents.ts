@@ -35,7 +35,7 @@ export const createAgent: McpToolDefinition = {
   tool: {
     name: 'create_agent',
     description:
-      'Create a long-lived companion sub-agent (research assistant, task manager, specialist) — the name becomes your destination for it. May require admin approval before the agent is created. Fire-and-forget.',
+      'Create a long-lived companion sub-agent. Disabled on single-agent installs unless ALLOW_MULTIPLE_AGENT_GROUPS=true. May require admin approval. Fire-and-forget.',
     inputSchema: {
       type: 'object' as const,
       properties: {

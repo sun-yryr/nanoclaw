@@ -59,7 +59,7 @@ registerResource({
       name: 'session_mode',
       type: 'string',
       description:
-        '"shared" — one session per (agent, messaging group). "per-thread" — separate session per thread/topic. "agent-shared" — one session across all messaging groups wired to this agent. Note: threaded adapters in group chats force per-thread regardless of this setting.',
+        '"shared" — one session per (agent, messaging group). "per-thread" — separate session per thread/topic. "agent-shared" — one session across all messaging groups wired to this agent. Threaded group chats honour this setting unless FORCE_PER_THREAD_IN_GROUP_CHATS=true.',
       enum: ['shared', 'per-thread', 'agent-shared'],
       default: 'shared',
       updatable: true,

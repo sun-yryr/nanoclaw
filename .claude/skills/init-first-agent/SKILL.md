@@ -84,7 +84,7 @@ Add `--welcome "System instruction: ..."` to override the default welcome prompt
 
 The script:
 1. Upserts the `users` row and grants `owner` role if no owner exists.
-2. Creates the `agent_groups` row and calls `initGroupFilesystem` at `groups/dm-with-<name>/`.
+2. Creates or **reuses** the `agent_groups` row (`groups/dm-with-<name>/` on first run; later runs reuse the existing group in single-agent mode) and calls `initGroupFilesystem`.
 3. Reuses or creates the DM `messaging_groups` row.
 4. Wires them via `messaging_group_agents` (which auto-creates the companion `agent_destinations` row).
 5. Hands the welcome message to the running service via its CLI socket (`data/cli.sock`), targeting the DM messaging group. The service routes it into the DM session, which wakes the container synchronously. If the socket isn't reachable (service down), falls back to a direct `inbound.db` write that the next host sweep picks up.

@@ -31,6 +31,7 @@ import type { InboundEvent } from '../../channels/adapter.js';
 import { registerResponseHandler, type ResponsePayload } from '../../response-registry.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
+import { allowMultipleAgentGroups } from '../../single-agent.js';
 import type { MessagingGroup, MessagingGroupAgent } from '../../types.js';
 import { canAccessAgentGroup } from './access.js';
 import {
@@ -383,6 +384,12 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
 
   // ── Create new agent — prompt for free-text name ──
   if (payload.value === NEW_AGENT_VALUE) {
+    if (!allowMultipleAgentGroups()) {
+      log.warn('Channel registration: create-new-agent disabled (single-agent mode)', {
+        messagingGroupId: row.messaging_group_id,
+      });
+      return true;
+    }
     const approverDm = await ensureUserDm(row.approver_user_id);
     if (!approverDm) {
       log.error('Channel registration: no DM channel for approver', {

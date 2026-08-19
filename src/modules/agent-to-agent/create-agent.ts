@@ -21,6 +21,7 @@ import { getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import { log } from '../../log.js';
+import { allowMultipleAgentGroups } from '../../single-agent.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { AgentGroup, Session } from '../../types.js';
 import { requestApproval, type ApprovalHandler } from '../approvals/index.js';
@@ -57,6 +58,14 @@ function notifyAgent(session: Session, text: string): void {
  * Unknown/missing config fails closed to the approval path.
  */
 export async function handleCreateAgent(content: Record<string, unknown>, session: Session): Promise<void> {
+  if (!allowMultipleAgentGroups()) {
+    notifyAgent(
+      session,
+      'create_agent is disabled. This install uses a single agent group. Set ALLOW_MULTIPLE_AGENT_GROUPS=true to create sub-agents.',
+    );
+    return;
+  }
+
   const name = typeof content.name === 'string' ? content.name : '';
   const instructions = typeof content.instructions === 'string' ? content.instructions : null;
 
@@ -94,6 +103,13 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
  * a confined (non-global) agent group. `session` is the requesting parent.
  */
 export const applyCreateAgent: ApprovalHandler = async ({ session, payload, notify }) => {
+  if (!allowMultipleAgentGroups()) {
+    notify(
+      'create_agent is disabled. This install uses a single agent group. Set ALLOW_MULTIPLE_AGENT_GROUPS=true to create sub-agents.',
+    );
+    return;
+  }
+
   const name = typeof payload.name === 'string' ? payload.name : '';
   const instructions = typeof payload.instructions === 'string' ? payload.instructions : null;
 

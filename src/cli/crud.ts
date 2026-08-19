@@ -67,6 +67,8 @@ export interface ResourceDef {
     update?: Access;
     delete?: Access;
   };
+  /** Runs immediately before a generic create insert. Throw to refuse. */
+  createGuard?: () => void;
   /** Non-standard verbs (grant, revoke, add, remove, restart, etc.). */
   customOperations?: Record<string, CustomOperation>;
 }
@@ -128,6 +130,7 @@ function genericGet(def: ResourceDef) {
 
 function genericCreate(def: ResourceDef) {
   return async (args: Record<string, unknown>) => {
+    def.createGuard?.();
     const values: Record<string, unknown> = {};
 
     for (const col of def.columns) {
