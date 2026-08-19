@@ -51,6 +51,8 @@ https://example.com/builds/123                      # Bare URL — auto-linked
 
 When you only have a URL and no good label, paste the bare URL. When you have a label, use `[label](url)` with a **short human-readable title**, not the raw URL repeated.
 
+The host posts Discord text as raw (it does not run Chat SDK markdown conversion, which would turn every URL into `[url](url)`) and unwraps identical-label links to a bare URL. Do not rely on that for named links — pick a real title when you have one.
+
 ### Lists
 
 Discord supports bullet and numbered lists:
