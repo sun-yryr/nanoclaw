@@ -15,7 +15,9 @@ import {
   LinkButton,
   type CardChild,
   type Adapter,
+  type AdapterPostableMessage,
   type ConcurrencyStrategy,
+  type FileUpload,
   type Message as ChatMessage,
 } from 'chat';
 import { log } from '../log.js';
@@ -75,6 +77,15 @@ export interface ChatSdkBridgeConfig {
    * quirk (e.g. Telegram's legacy Markdown parse mode).
    */
   transformOutboundText?: (text: string) => string;
+  /**
+   * Post text as Chat SDK `{ raw }` instead of `{ markdown }`.
+   *
+   * Discord's markdown converter re-serializes every URL as `[url](url)`
+   * (remark-gfm autolink → `[${text}](${url})`). Discord then fails to
+   * render those identical-label links. Raw pass-through keeps bare URLs
+   * and named `[label](url)` links intact.
+   */
+  postAsRaw?: boolean;
   /**
    * Maximum text length the underlying adapter accepts in a single message.
    * When set, the bridge splits outbound text longer than this on paragraph
@@ -155,6 +166,10 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     );
   }
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
+  const toTextMessage = (chunk: string, files?: FileUpload[]): AdapterPostableMessage => {
+    const filesPart = files && files.length > 0 ? { files } : {};
+    return config.postAsRaw ? { raw: chunk, ...filesPart } : { markdown: chunk, ...filesPart };
+  };
   let chat: Chat;
   let state: SqliteStateAdapter;
   let setupConfig: ChannelSetup;
@@ -424,9 +439,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           });
           return;
         }
-        await adapter.editMessage(tid, msgId, {
-          markdown: transformText((content.text as string) || (content.markdown as string) || ''),
-        });
+        await adapter.editMessage(
+          tid,
+          msgId,
+          toTextMessage(transformText((content.text as string) || (content.markdown as string) || '')),
+        );
         return;
       }
 
@@ -547,10 +564,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
-          const result = await adapter.postMessage(
-            tid,
-            attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
-          );
+          const result = await adapter.postMessage(tid, toTextMessage(chunk, attachFiles ? fileUploads : undefined));
           if (i === 0) firstId = result?.id;
         }
         return firstId;
@@ -560,7 +574,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           data: f.data,
           filename: f.filename,
         }));
-        const result = await adapter.postMessage(tid, { markdown: '', files: fileUploads });
+        const result = await adapter.postMessage(tid, toTextMessage('', fileUploads));
         return result?.id;
       }
     },

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { parseMarkdown } from 'chat';
 import { describe, expect, it } from 'vitest';
 
 import { unwrapIdenticalDiscordLinks } from './discord-links.js';
@@ -58,8 +59,29 @@ describe('unwrapIdenticalDiscordLinks', () => {
 });
 
 describe('discord adapter wiring', () => {
-  it('passes unwrapIdenticalDiscordLinks as transformOutboundText', () => {
+  it('posts as raw and unwraps identical-label links', () => {
     const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'discord.ts'), 'utf8');
+    expect(src).toMatch(/postAsRaw:\s*true/);
     expect(src).toMatch(/transformOutboundText:\s*unwrapIdenticalDiscordLinks/);
+  });
+});
+
+describe('Chat SDK markdown conversion (Discord)', () => {
+  it('parses a bare URL as a link node that Discord would emit as [url](url)', () => {
+    const ast = parseMarkdown('see https://example.com/foo');
+    const links: string[] = [];
+    const walk = (node: unknown) => {
+      if (!node || typeof node !== 'object') return;
+      const n = node as { type?: string; url?: string; children?: unknown[]; value?: string };
+      if (n.type === 'link' && n.url) {
+        const text = (n.children ?? [])
+          .map((c) => (c && typeof c === 'object' && 'value' in c ? String((c as { value?: string }).value ?? '') : ''))
+          .join('');
+        links.push(`[${text}](${n.url})`);
+      }
+      if (Array.isArray(n.children)) n.children.forEach(walk);
+    };
+    walk(ast);
+    expect(links).toEqual(['[https://example.com/foo](https://example.com/foo)']);
   });
 });

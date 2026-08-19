@@ -386,4 +386,32 @@ describe('createChatSdkBridge.deliver — transformOutboundText', () => {
     });
     expect(edits).toEqual([{ markdown: '[rewritten] hello' }]);
   });
+
+  it('posts and edits as { raw } when postAsRaw is set (Discord)', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const edits: AdapterPostableMessage[] = [];
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({
+        postMessage,
+        editMessage: async (_threadId, _messageId, content) => {
+          edits.push(content);
+          return { id: 'msg-stub', threadId: _threadId, raw: {} };
+        },
+      }),
+      supportsThreads: false,
+      postAsRaw: true,
+      transformOutboundText: (t) => t.replaceAll('[https://example.com](https://example.com)', 'https://example.com'),
+    });
+    await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: { text: 'go [https://example.com](https://example.com)' },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].message).toEqual({ raw: 'go https://example.com' });
+    await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: { operation: 'edit', messageId: 'm1', text: 'hello' },
+    });
+    expect(edits).toEqual([{ raw: 'hello' }]);
+  });
 });

@@ -34,6 +34,7 @@ registerChannelAdapter('discord', {
       botToken: env.DISCORD_BOT_TOKEN,
       extractReplyContext,
       supportsThreads: true,
+      postAsRaw: true,
       transformOutboundText: unwrapIdenticalDiscordLinks,
     });
   },
