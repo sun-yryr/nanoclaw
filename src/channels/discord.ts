@@ -7,6 +7,7 @@ import { createDiscordAdapter } from '@chat-adapter/discord';
 import { readEnvFile } from '../env.js';
 import { createChatSdkBridge, type ReplyContext } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
+import { unwrapIdenticalDiscordLinks } from './discord-links.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
@@ -33,6 +34,7 @@ registerChannelAdapter('discord', {
       botToken: env.DISCORD_BOT_TOKEN,
       extractReplyContext,
       supportsThreads: true,
+      transformOutboundText: unwrapIdenticalDiscordLinks,
     });
   },
 });

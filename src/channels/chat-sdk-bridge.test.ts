@@ -350,3 +350,39 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(msg.markdown).toBe('plain hello');
   });
 });
+
+describe('createChatSdkBridge.deliver — transformOutboundText', () => {
+  it('applies the transform to posted markdown', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      transformOutboundText: (t) => t.replaceAll('[https://example.com](https://example.com)', 'https://example.com'),
+    });
+    await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: { text: 'go [https://example.com](https://example.com)' },
+    });
+    expect(calls).toHaveLength(1);
+    const msg = calls[0].message as { markdown?: string };
+    expect(msg.markdown).toBe('go https://example.com');
+  });
+
+  it('applies the transform to edited markdown', async () => {
+    const edits: Array<{ markdown: string }> = [];
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({
+        editMessage: async (_threadId, _messageId, content: { markdown: string }) => {
+          edits.push(content);
+        },
+      }),
+      supportsThreads: false,
+      transformOutboundText: (t) => `[rewritten] ${t}`,
+    });
+    await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: { operation: 'edit', messageId: 'm1', text: 'hello' },
+    });
+    expect(edits).toEqual([{ markdown: '[rewritten] hello' }]);
+  });
+});
