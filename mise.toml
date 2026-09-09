@@ -1,0 +1,4 @@
+[tools]
+"github:joargp/tablesnap" = "latest"
+"github:xdevplatform/xurl" = "latest"
+"npm:kanban" = "latest"
