@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { closeSessionDb, getInboundDb, getOutboundDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
 import { findQuestionResponse } from '../db/messages-in.js';
-import { askUserQuestion, LINK_ACTION_SCHEMA, sendCard } from './interactive.js';
+import { askUserQuestion, LINK_ACTION_SCHEMA, LINK_URL_RUNTIME_RE, sendCard } from './interactive.js';
 
 beforeEach(() => initTestSessionDb());
 afterEach(() => closeSessionDb());
@@ -193,16 +193,21 @@ describe('send_card', () => {
     expect(url.description).toContain('http or https');
   });
 
-  // llama.cpp compiles tool schemas to a grammar and rejects these escapes,
-  // failing every request that carries send_card.
-  it('keeps the url pattern free of escapes a grammar converter rejects', () => {
+  // Advertised schema pattern must stay simple: DeepSeek rejects the fussy
+  // character-class ranges as an invalid function schema (HTTP 400 on every
+  // chat/completions request that carries send_card). llama.cpp similarly
+  // rejects \\s / \\S escapes. Strict host/whitespace rules live in
+  // LINK_URL_RUNTIME_RE and are enforced on the payload.
+  it('keeps the advertised url pattern simple for upstream schema validators', () => {
     const { pattern } = LINK_ACTION_SCHEMA.properties.url as { pattern: string };
 
     expect(pattern).not.toMatch(/\\[sStn]/);
+    expect(pattern).toBe('^[hH][tT][tT][pP][sS]?://.+$');
+  });
 
-    const re = new RegExp(pattern);
+  it('enforces the strict url rules at runtime', () => {
     for (const url of ['https://example.com', 'http://a', 'https://x.io/p?q=1#f', 'HTTP://h:8080/~u']) {
-      expect(re.test(url)).toBe(true);
+      expect(LINK_URL_RUNTIME_RE.test(url)).toBe(true);
     }
     for (const url of [
       'https://',
@@ -217,7 +222,7 @@ describe('send_card', () => {
       'https://a.com/\\x',
       'https://"a.com',
     ]) {
-      expect(re.test(url)).toBe(false);
+      expect(LINK_URL_RUNTIME_RE.test(url)).toBe(false);
     }
   });
 

@@ -37,6 +37,22 @@ function routing() {
 }
 
 /**
+ * Strict URL check for payloads we accept. Kept out of the advertised JSON
+ * Schema: DeepSeek (and similar OpenAI-compatible validators) reject the
+ * nested character-class ranges as an invalid function schema and 400 the
+ * entire chat/completions request that carries send_card.
+ *
+ * Rejected: '#', '/docs', 'localhost:3000', 'javascript:', 'mailto:',
+ * hostless 'https://', whitespace. Printable-ASCII ranges stand in for \s /
+ * \S (llama.cpp's schema-to-grammar converter also rejects those escapes).
+ * Non-ASCII URLs are normalized with `new URL()` before validation
+ * (see normalizeLinkUrl).
+ */
+export const LINK_URL_RUNTIME_RE = new RegExp(
+  '^[hH][tT][tT][pP][sS]?://[!$-.0->@-[\\]-~][!#-[\\]-~]*$',
+);
+
+/**
  * The one definition of a send_card action: send_card is fire-and-forget, so
  * only a link button survives (src/channels/chat-sdk-bridge.ts). It is both
  * advertised in the tool's inputSchema and enforced on the payload, so the
@@ -50,7 +66,8 @@ function routing() {
  * reads.
  *
  * Frozen because the same object is the advertised schema and the source the
- * validator was compiled from; a later mutation would silently desync them.
+ * Ajv shape validator was compiled from; a later mutation would silently
+ * desync them. Strict URL rules are enforced separately via LINK_URL_RUNTIME_RE.
  */
 export const LINK_ACTION_SCHEMA = Object.freeze({
   type: 'object' as const,
@@ -62,22 +79,13 @@ export const LINK_ACTION_SCHEMA = Object.freeze({
     // for exactly that: it cannot make a callback button, so it fakes one.
     // http and https are the only schemes every adapter can turn into a button,
     // and the agent does not pick the channel, so the tool promises no more
-    // than that. The pattern is deliberately fussy: the scheme is matched
-    // case-insensitively (RFC 3986 makes it so, and a url lifted verbatim out
-    // of a document may be uppercase), a host character is required so a
-    // hostless 'https://' cannot satisfy the retry advice the drop message
-    // gives, and the anchors reject whitespace, which would otherwise break out
-    // of '[label](url)' on an adapter that degrades a card to markdown.
-    // Rejected: '#', '/docs', 'localhost:3000', 'javascript:', 'mailto:'.
-    // Printable-ASCII ranges stand in for \s and \S: llama.cpp's
-    // schema-to-grammar converter rejects those escapes and fails every request
-    // that carries this tool. The classes also leave out '"' and '\\', which
-    // the converter would otherwise copy into the JSON string rule. The first
-    // host character excludes '#', '/' and '?'. Non-ASCII URLs are normalized
-    // with `new URL()` before validation (see normalizeLinkUrl).
+    // than that. The advertised pattern stays simple so upstream schema
+    // validators (DeepSeek, llama.cpp grammar conversion) accept the tool;
+    // LINK_URL_RUNTIME_RE enforces the fussy host/whitespace rules on the
+    // payload.
     url: {
       type: 'string' as const,
-      pattern: '^[hH][tT][tT][pP][sS]?://[!$-.0->@-[\\]-~][!#-[\\]-~]*$',
+      pattern: '^[hH][tT][tT][pP][sS]?://.+$',
       description: "Web link (http or https), e.g. 'https://example.com'.",
     },
     style: {
@@ -89,6 +97,12 @@ export const LINK_ACTION_SCHEMA = Object.freeze({
 
 /** Compiled once: the handler runs it per action on every send_card call. */
 const validateLinkAction = new AjvJsonSchemaValidator().getValidator<Record<string, unknown>>(LINK_ACTION_SCHEMA);
+
+function isValidLinkAction(action: unknown): boolean {
+  if (!validateLinkAction(action).valid) return false;
+  const url = (action as { url?: unknown }).url;
+  return typeof url === 'string' && LINK_URL_RUNTIME_RE.test(url);
+}
 
 /**
  * Split a card's actions into the ones the bridge will render and a count of
@@ -119,7 +133,7 @@ function partitionActions(card: Record<string, unknown>): { card: Record<string,
   if (!Array.isArray(actions)) return { card, dropped: 0 };
 
   const normalized = actions.map(normalizeLinkUrl);
-  const valid = normalized.filter((action) => validateLinkAction(action).valid);
+  const valid = normalized.filter((action) => isValidLinkAction(action));
   const changed = normalized.some((action, index) => action !== actions[index]);
   if (valid.length === actions.length && !changed) return { card, dropped: 0 };
 
