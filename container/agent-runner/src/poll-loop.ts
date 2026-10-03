@@ -31,8 +31,15 @@ import {
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
-import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
+import type {
+  AgentProvider,
+  AgentQuery,
+  ProviderEvent,
+  ProviderExchange,
+  UserContentPart,
+} from './providers/types.js';
 import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
+import { buildUserContentFromMessages } from './media/index.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -235,11 +242,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
     const prompt = formatMessagesWithCommands(keep, nativeSlashCommands, config.providerName);
+    const turn = await buildUserContentFromMessages(keep);
+    const userContent = mergeUserContent(turn.userContent, turn.userContent ? turn.prompt : prompt);
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
     const query = config.provider.query({
       prompt,
+      userContent,
       continuation,
       cwd: config.cwd,
       systemContext: config.systemContext,
@@ -346,6 +356,26 @@ function formatMessagesWithCommands(
   }
 
   return parts.join('\n\n');
+}
+
+/**
+ * When multimodal parts exist, keep media blocks and replace the text part
+ * with the command-aware prompt from formatMessagesWithCommands.
+ */
+function mergeUserContent(
+  userContent: UserContentPart[] | undefined,
+  prompt: string,
+): UserContentPart[] | undefined {
+  if (!userContent || userContent.length === 0) return undefined;
+
+  const media = userContent.filter((p) => p.type !== 'text');
+  const parts: UserContentPart[] = [...media];
+  if (prompt.trim()) {
+    parts.push({ type: 'text', text: prompt });
+  } else if (media.length > 0) {
+    parts.push({ type: 'text', text: 'The user sent media without a caption.' });
+  }
+  return parts.length > 0 ? parts : undefined;
 }
 
 interface QueryResult {
@@ -528,8 +558,10 @@ export async function processQuery(
 
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
+        const turn = await buildUserContentFromMessages(keep);
+        const userContent = mergeUserContent(turn.userContent, turn.userContent ? turn.prompt : prompt);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
-        query.push(prompt);
+        query.push(prompt, userContent);
         archivePrompts.push(prompt);
         const next: QueuedTurn = {
           routing: extractRouting(keep),

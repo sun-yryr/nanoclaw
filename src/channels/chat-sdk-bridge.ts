@@ -22,6 +22,7 @@ import {
   type FileUpload,
   type Message as ChatMessage,
 } from 'chat';
+import { downloadAttachmentBase64 } from '../attachment-download.js';
 import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
@@ -504,7 +505,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const serialized = message.toJSON() as Record<string, any>;
 
-    // Download attachment data before serialization loses fetchData()
+    // Download attachment bytes before serialization loses fetchData()/url
+    // access. Discord/Slack expose CDN `url` without fetchData — use
+    // downloadAttachmentBase64 so session-manager can materialize inbox files.
     if (message.attachments && message.attachments.length > 0) {
       const enriched = [];
       for (const att of message.attachments) {
@@ -517,13 +520,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           width: (att as unknown as Record<string, unknown>).width,
           height: (att as unknown as Record<string, unknown>).height,
         };
-        if (att.fetchData) {
-          try {
-            const buffer = await att.fetchData();
-            entry.data = buffer.toString('base64');
-          } catch (err) {
-            log.warn('Failed to download attachment', { type: att.type, err });
-          }
+        if (typeof att.url === 'string' && att.url) {
+          entry.url = att.url;
+        }
+        const base64 = await downloadAttachmentBase64(att);
+        if (base64) {
+          entry.data = base64;
         }
         enriched.push(entry);
       }
@@ -857,7 +859,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         ) {
           await adapter.editMessage(tid, msgId, terminalApprovalMessage(terminalCard as TerminalApprovalCard));
         } else {
-          await adapter.editMessage(tid, msgId, toTextMessage(transformText((content.text as string) || (content.markdown as string) || '')));
+          await adapter.editMessage(
+            tid,
+            msgId,
+            toTextMessage(transformText((content.text as string) || (content.markdown as string) || '')),
+          );
         }
         return;
       }
@@ -993,10 +999,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
-          const result = await adapter.postMessage(
-            tid,
-            toTextMessage(chunk, attachFiles ? fileUploads : undefined),
-          );
+          const result = await adapter.postMessage(tid, toTextMessage(chunk, attachFiles ? fileUploads : undefined));
           if (i === 0) firstId = result?.id;
         }
         return firstId;

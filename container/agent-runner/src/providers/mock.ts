@@ -86,7 +86,7 @@ export class MockProvider implements AgentProvider {
     };
 
     return {
-      push(message: string) {
+      push(message: string, _userContent?: import('./types.js').UserContentPart[]) {
         pending.push(message);
         waiting?.();
       },

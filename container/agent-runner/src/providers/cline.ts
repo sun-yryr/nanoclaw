@@ -22,15 +22,9 @@ import type {
   ProviderEvent,
   ProviderOptions,
   QueryInput,
+  UserContentPart,
 } from './types.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
-
-/** Local multimodal parts (2.4 QueryInput is text-only). */
-type UserContentPart =
-  | { type: 'text'; text: string }
-  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
-  | { type: 'image'; source: { type: 'url'; url: string } }
-  | { type: 'document'; source: { type: 'base64'; media_type: string; data: string }; title?: string };
 
 function log(msg: string): void {
   console.error(`[cline-provider] ${msg}`);
@@ -447,9 +441,20 @@ export class ClineProvider implements AgentProvider {
         // ── First turn ──
         let runDone = false;
         let runResult: Awaited<ReturnType<typeof agent.run>> | undefined;
-        const firstInput = toAgentInput(input.prompt);
+        const firstInput = toAgentInput(input.prompt, input.userContent);
+        if (input.userContent?.length) {
+          const clineParts = typeof firstInput === 'object' ? firstInput.content : [];
+          const imageCount = clineParts.filter((p) => p.type === 'image').length;
+          const videoCount = clineParts.filter((p) => p.type === 'video_url').length;
+          log(
+            `Multimodal turn: ${input.userContent.length} part(s) → ${clineParts.length} Cline part(s), ` +
+              `${imageCount} image(s), ${videoCount} video(s)`,
+          );
+        }
         const runPromise = agent
-          .run(firstInput)
+          // Cline accepts string | AgentMessage; multimodal uses a user-role
+          // content array (may include video_url passthrough beyond AgentMessagePart).
+          .run(firstInput as Parameters<typeof agent.run>[0])
           .then((r: AgentRunResult) => {
             runDone = true;
             runResult = r;
@@ -532,7 +537,7 @@ export class ClineProvider implements AgentProvider {
             let continueDone = false;
             let continueResult: Awaited<ReturnType<typeof agent.continue>> | undefined;
             const continuePromise = agent
-              .continue(toAgentInput(followUp.text))
+              .continue(toAgentInput(followUp.text, followUp.userContent) as Parameters<typeof agent.continue>[0])
               .then((r: AgentRunResult) => {
                 continueDone = true;
                 continueResult = r;
@@ -604,9 +609,9 @@ export class ClineProvider implements AgentProvider {
     }
 
     return {
-      push: (message: string) => {
+      push: (message: string, userContent?: UserContentPart[]) => {
         log(`push() called: ${message.substring(0, 100)}...`);
-        pending.push({ text: message });
+        pending.push({ text: message, userContent });
         kick();
       },
       end: () => {
@@ -626,7 +631,63 @@ export class ClineProvider implements AgentProvider {
 
 registerProvider('cline', (opts) => new ClineProvider(opts));
 
-function toAgentInput(prompt: string): string {
-  // 2.4 QueryInput is text-only; multimodal re-attach later via media helpers.
+/** Cline Agent content parts — AI SDK shape (`image`, not OpenAI `image_url` / `data`). */
+type ClineUserContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; image: string; mediaType: string }
+  | { type: 'video_url'; video_url: { url: string } };
+
+function parseDataUrl(url: string): { mediaType: string; image: string } | null {
+  const match = url.match(/^data:([^;,]+);base64,(.+)$/);
+  if (!match?.[1] || !match[2]) return null;
+  return { mediaType: match[1], image: match[2] };
+}
+
+function summarizeMediaUrl(url: string): string {
+  if (url.startsWith('data:')) {
+    const semi = url.indexOf(';');
+    return semi >= 0 ? `${url.slice(0, semi)};base64,…` : 'data:…';
+  }
+  return url.length > 120 ? `${url.slice(0, 120)}…` : url;
+}
+
+/** Map Kimi/OpenAI-style parts to the format Cline's Agent runtime understands. */
+export function toClineUserContent(userContent: UserContentPart[]): ClineUserContentPart[] {
+  const parts: ClineUserContentPart[] = [];
+
+  for (const part of userContent) {
+    if (part.type === 'text') {
+      if (part.text.trim()) parts.push({ type: 'text', text: part.text });
+      continue;
+    }
+
+    if (part.type === 'image_url') {
+      const parsed = parseDataUrl(part.image_url.url);
+      if (parsed) {
+        parts.push({ type: 'image', image: parsed.image, mediaType: parsed.mediaType });
+      } else {
+        log(`Skipping non-data image_url for Cline (${summarizeMediaUrl(part.image_url.url)})`);
+      }
+      continue;
+    }
+
+    if (part.type === 'video_url') {
+      parts.push({ type: 'video_url', video_url: { url: part.video_url.url } });
+    }
+  }
+
+  return parts;
+}
+
+function toAgentInput(
+  prompt: string,
+  userContent?: UserContentPart[],
+): string | { role: 'user'; content: ClineUserContentPart[] } {
+  if (userContent && userContent.length > 0) {
+    const content = toClineUserContent(userContent);
+    if (content.length > 0) {
+      return { role: 'user', content };
+    }
+  }
   return prompt;
 }
