@@ -6,6 +6,7 @@ import { spawnSync } from 'child_process';
 import crypto from 'crypto';
 
 import { buildClineBuiltinTools } from './cline-builtin-tools.js';
+import { createModelIoHooks } from './cline-model-io.js';
 import {
   isOpaqueSessionId,
   loadSessionSnapshot,
@@ -402,6 +403,9 @@ export class ClineProvider implements AgentProvider {
           headers: {
             'x-opencode-session': sessionId,
           },
+          // Persist SDK-layer model I/O under /workspace/debug/model-io/
+          // (host: data/v2-sessions/<group>/<session>/debug/model-io/).
+          hooks: createModelIoHooks({ providerId, modelId, sessionId }),
           // Pass through verbatim; invalid values fail at the SDK / upstream.
           ...(reasoningEffort ? { reasoningEffort: reasoningEffort as 'low' | 'medium' | 'high' | 'xhigh' } : {}),
         });
