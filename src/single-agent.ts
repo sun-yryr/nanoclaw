@@ -15,12 +15,7 @@ import {
   getMessagingGroupAgentByPair,
   updateMessagingGroupAgent,
 } from './db/messaging-groups.js';
-import {
-  getAgentGroup,
-  getAgentGroupByFolder,
-  getAllAgentGroups,
-  createAgentGroup,
-} from './db/agent-groups.js';
+import { getAgentGroup, getAgentGroupByFolder, getAllAgentGroups, createAgentGroup } from './db/agent-groups.js';
 import { getDb } from './db/connection.js';
 import { log } from './log.js';
 import type { AgentGroup, MessagingGroupAgent } from './types.js';
@@ -114,12 +109,7 @@ export function effectiveSessionMode(
   wiredMode: MessagingGroupAgent['session_mode'],
   opts: { adapterSupportsThreads: boolean; isGroup: boolean },
 ): MessagingGroupAgent['session_mode'] {
-  if (
-    forcePerThreadInGroupChats() &&
-    opts.adapterSupportsThreads &&
-    wiredMode !== 'agent-shared' &&
-    opts.isGroup
-  ) {
+  if (forcePerThreadInGroupChats() && opts.adapterSupportsThreads && wiredMode !== 'agent-shared' && opts.isGroup) {
     return 'per-thread';
   }
   return wiredMode;
