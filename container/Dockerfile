@@ -16,6 +16,16 @@
 # bind mount at runtime (see src/container-runner.ts). Source-only changes
 # never require an image rebuild.
 
+# ---- tablesnap (patched for CJK system fonts) --------------------------------
+ARG TABLESNAP_VERSION=1.0.0
+FROM golang:1.24-bookworm AS tablesnap-build
+ARG TABLESNAP_VERSION
+WORKDIR /src
+RUN git clone --depth 1 --branch "v${TABLESNAP_VERSION}" https://github.com/joargp/tablesnap.git .
+COPY tablesnap/cjk-font.patch /tmp/cjk-font.patch
+RUN git apply /tmp/cjk-font.patch && \
+    CGO_ENABLED=0 go build -o /tablesnap ./cmd/tablesnap
+
 FROM node:22-slim
 
 # ---- Build-time arguments ----------------------------------------------------
@@ -28,16 +38,23 @@ ARG INSTALL_CJK_FONTS=false
 # pinned in cli-tools.json so a skill can add one with a json-merge; Bun (the
 # runtime) is pinned here because it installs from a different source.
 ARG BUN_VERSION=1.4.0
+ARG CALENDAR_MCP_VERSION=2.6.1
+ARG BRAVE_SEARCH_MCP_VERSION=2.0.83
+ARG GMAIL_MCP_VERSION=1.1.11
+ARG GTASKS_MCP_VERSION=0.2.1
+ARG MAPBOX_MCP_VERSION=0.12.5
 
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
 # SIGTERM instead of being orphaned by the shell entrypoint.
+# fonts-ipafont-gothic (~12MB): Japanese-capable TTF for tablesnap.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
         chromium \
         fonts-liberation \
         fonts-noto-color-emoji \
+        fonts-ipafont-gothic \
         libgbm1 \
         libnss3 \
         libatk-bridge2.0-0 \
@@ -67,6 +84,20 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 # Belt-and-braces: prevent Playwright's postinstall from downloading its own
 # ~300MB Chromium. We've already installed the system one above.
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
+# ---- mnemon — persistent agent memory ----------------------------------------
+ARG MNEMON_VERSION=0.1.14
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL "https://github.com/mnemon-dev/mnemon/releases/download/v${MNEMON_VERSION}/mnemon_${MNEMON_VERSION}_linux_${ARCH}.tar.gz" \
+    | tar -xz -C /usr/local/bin mnemon && \
+    chmod +x /usr/local/bin/mnemon
+ENV MNEMON_DATA_DIR=/workspace/agent/.claude/mnemon
+
+# ---- tablesnap — markdown tables → PNG (CJK via IPA Gothic) ------------------
+COPY --from=tablesnap-build /tablesnap /usr/local/bin/tablesnap
+RUN HOME=/home/node tablesnap emojis install && \
+    chown -R node:node /home/node/.cache
+ENV TABLESNAP_FONT=/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf
 
 # ---- Bun runtime -------------------------------------------------------------
 # Install via the official script (handles multi-arch detection), then move
@@ -118,6 +149,22 @@ RUN npm install -g npm@${NPM_VERSION}
 COPY cli-tools.json install-cli-tools.sh /tmp/
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     sh /tmp/install-cli-tools.sh /tmp/cli-tools.json
+
+# ---- MCP servers (stdio CLIs; OneCLI injects credentials at request time) ----
+# GDrive intentionally omitted for this install.
+RUN --mount=type=cache,target=/root/.cache/pnpm \
+    echo "only-built-dependencies[]=" > /root/.npmrc && \
+    pnpm install -g \
+        "@cocal/google-calendar-mcp@${CALENDAR_MCP_VERSION}" \
+        "@brave/brave-search-mcp-server@${BRAVE_SEARCH_MCP_VERSION}" \
+        "@mapbox/mcp-server@${MAPBOX_MCP_VERSION}"
+
+RUN --mount=type=cache,target=/root/.cache/pnpm \
+    echo "only-built-dependencies[]=" > /root/.npmrc && \
+    pnpm install -g \
+        "@gongrzhe/server-gmail-autoauth-mcp@${GMAIL_MCP_VERSION}" \
+        "@scottie-will/google-tasks-mcp@${GTASKS_MCP_VERSION}" \
+        "zod-to-json-schema@3.22.5"
 
 # ---- ncl CLI wrapper ----------------------------------------------------------
 # Actual script lives in the mounted source at /app/src/cli/ncl.ts.
