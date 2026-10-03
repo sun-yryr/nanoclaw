@@ -330,28 +330,21 @@ export class ClineProvider implements AgentProvider {
           log(`Resolved CLAUDE.md instructions (${claudeMd.length} chars)`);
         }
 
-        const agent = new Agent({
-          providerId: 'openai-compatible',
-          modelId,
-          apiKey,
-          baseUrl,
-          systemPrompt: systemPrompt || undefined,
-          tools,
-          maxIterations: 50,
-        });
-
         // Claude-shaped resume: continuation is an opaque session id; the
         // conversation body lives on disk under ~/.claude/cline-sessions/.
+        // Resolve the id BEFORE constructing Agent so OpenCode Go can get a
+        // stable x-opencode-session header (required since 2026-09-05).
+        // See https://github.com/vercel/ai/issues/20271
         let sessionId =
           input.continuation && isOpaqueSessionId(input.continuation)
             ? input.continuation
             : crypto.randomUUID();
+        let snapshotToRestore: ReturnType<typeof loadSessionSnapshot> | null = null;
 
         if (input.continuation && isOpaqueSessionId(input.continuation)) {
           const snapshot = loadSessionSnapshot(input.continuation);
           if (snapshot?.messages && snapshot.messages.length > 0) {
-            agent.restore(snapshot.messages);
-            log(`Restored ${snapshot.messages.length} messages from session ${input.continuation}`);
+            snapshotToRestore = snapshot;
           } else {
             // Missing / empty transcript — start a fresh session id so we don't
             // keep pointing session_state at a dead file.
@@ -361,6 +354,24 @@ export class ClineProvider implements AgentProvider {
         } else if (input.continuation) {
           sessionId = crypto.randomUUID();
           log(`Ignoring non-opaque continuation; starting fresh session ${sessionId}`);
+        }
+
+        const agent = new Agent({
+          providerId: 'openai-compatible',
+          modelId,
+          apiKey,
+          baseUrl,
+          systemPrompt: systemPrompt || undefined,
+          tools,
+          maxIterations: 50,
+          headers: {
+            'x-opencode-session': sessionId,
+          },
+        });
+
+        if (snapshotToRestore?.messages?.length) {
+          agent.restore(snapshotToRestore.messages);
+          log(`Restored ${snapshotToRestore.messages.length} messages from session ${sessionId}`);
         }
 
         const persist = (): void => {

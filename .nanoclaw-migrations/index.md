@@ -4,6 +4,8 @@ Generated: 2026-10-03
 Base: `36cbf17e107fd0f8daea4ceb2ac523d9f0d88915`
 HEAD at generation: `5183f47ac903b36fa325d24900cfd5fb499149d1`
 Upstream at generation: `6906434bcb13eaeca1a6d8b461a1f2c22e53359f` (`upstream/main`)
+Upgraded: 2026-10-03 → HEAD `794098bec192cc6920540a040da3c8610cf4046b` (NanoClaw 2.4.0 via migrate-nanoclaw)
+Backup tag: `pre-migrate-a44eeb83-20261003-173323`
 
 ## How to use this guide
 
