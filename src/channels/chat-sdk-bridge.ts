@@ -13,11 +13,13 @@ import {
   Actions,
   Button,
   LinkButton,
+  type AdapterPostableMessage,
   type CardChild,
   type Adapter,
   type AssistantContextChangedEvent,
   type AssistantThreadStartedEvent,
   type ConcurrencyStrategy,
+  type FileUpload,
   type Message as ChatMessage,
 } from 'chat';
 import { log } from '../log.js';
@@ -363,6 +365,14 @@ export interface ChatSdkBridgeConfig {
    */
   transformOutboundText?: (text: string) => string;
   /**
+   * Post text as Chat SDK `{ raw }` instead of `{ markdown }`.
+   *
+   * Discord's markdown converter re-serializes every URL as `[url](url)`
+   * (remark-gfm autolink). Discord then fails to render those identical-label
+   * links. Raw pass-through keeps bare URLs and named `[label](url)` links.
+   */
+  postAsRaw?: boolean;
+  /**
    * Maximum text length the underlying adapter accepts in a single message.
    * When set, the bridge splits outbound text longer than this on paragraph
    * → line → hard-char boundaries and posts multiple messages. Without this,
@@ -473,6 +483,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     );
   }
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
+  const toTextMessage = (chunk: string, files?: FileUpload[]): AdapterPostableMessage => {
+    const filesPart = files && files.length > 0 ? { files } : {};
+    return config.postAsRaw ? { raw: chunk, ...filesPart } : { markdown: chunk, ...filesPart };
+  };
+  const isCompositeAgentId = (id: string): boolean => id.includes(':ag-');
   /** Registry/routing key for this bridge — also the app-context cache
    *  namespace. Default instances key by the platform name. */
   const instanceKey = config.instance ?? adapter.name;
@@ -821,11 +836,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       const content = message.content as Record<string, unknown>;
 
       if (content.operation === 'edit' && content.messageId) {
+        const msgId = content.messageId as string;
+        if (isCompositeAgentId(msgId)) {
+          log.warn('Dropping edit with composite agent message id', { messageId: msgId });
+          return;
+        }
         const render =
           typeof content.questionId === 'string' ? await resolveQuestionRender(content.questionId) : undefined;
         if (render?.renderTerminal && content.terminalCard) {
           const terminal = content.terminalCard as { resolution: string };
-          await adapter.editMessage(tid, content.messageId as string, render.renderTerminal(terminal.resolution));
+          await adapter.editMessage(tid, msgId, render.renderTerminal(terminal.resolution));
           return;
         }
         const terminalCard = content.terminalCard as Partial<TerminalApprovalCard> | undefined;
@@ -835,21 +855,20 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           typeof terminalCard.question === 'string' &&
           typeof terminalCard.resolution === 'string'
         ) {
-          await adapter.editMessage(
-            tid,
-            content.messageId as string,
-            terminalApprovalMessage(terminalCard as TerminalApprovalCard),
-          );
+          await adapter.editMessage(tid, msgId, terminalApprovalMessage(terminalCard as TerminalApprovalCard));
         } else {
-          await adapter.editMessage(tid, content.messageId as string, {
-            markdown: transformText((content.text as string) || (content.markdown as string) || ''),
-          });
+          await adapter.editMessage(tid, msgId, toTextMessage(transformText((content.text as string) || (content.markdown as string) || '')));
         }
         return;
       }
 
       if (content.operation === 'reaction' && content.messageId && content.emoji) {
-        await adapter.addReaction(tid, content.messageId as string, content.emoji as string);
+        const msgId = content.messageId as string;
+        if (isCompositeAgentId(msgId)) {
+          log.warn('Dropping reaction with composite agent message id', { messageId: msgId });
+          return;
+        }
+        await adapter.addReaction(tid, msgId, content.emoji as string);
         return;
       }
 
@@ -976,7 +995,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
           const result = await adapter.postMessage(
             tid,
-            attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
+            toTextMessage(chunk, attachFiles ? fileUploads : undefined),
           );
           if (i === 0) firstId = result?.id;
         }
@@ -987,7 +1006,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           data: f.data,
           filename: f.filename,
         }));
-        const result = await adapter.postMessage(tid, { markdown: '', files: fileUploads });
+        const result = await adapter.postMessage(tid, toTextMessage('', fileUploads));
         return result?.id;
       }
     },

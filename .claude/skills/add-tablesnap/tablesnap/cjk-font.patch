@@ -1,0 +1,30 @@
+diff --git a/cmd/tablesnap/main.go b/cmd/tablesnap/main.go
+index fbfd6df..6ef07a9 100644
+--- a/cmd/tablesnap/main.go
++++ b/cmd/tablesnap/main.go
+@@ -131,7 +131,24 @@ func parseTable(input string) ([][]string, error) {
+ }
+ 
+ func loadFont(dc *gg.Context, size float64) error {
+-	// Use embedded Inter font for cross-platform support
++	// Prefer a system CJK-capable font (IPA Gothic / fallback), then Inter.
++	candidates := make([]string, 0, 6)
++	if v := os.Getenv("TABLESNAP_FONT"); v != "" {
++		candidates = append(candidates, v)
++	}
++	candidates = append(candidates,
++		"/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf",
++		"/usr/share/fonts/opentype/ipafont-gothic/ipagp.ttf",
++		"/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
++	)
++	for _, path := range candidates {
++		face, err := gg.LoadFontFace(path, size)
++		if err == nil {
++			dc.SetFontFace(face)
++			return nil
++		}
++	}
++
+ 	font, err := truetype.Parse(interFont)
+ 	if err != nil {
+ 		return fmt.Errorf("failed to parse embedded font: %w", err)

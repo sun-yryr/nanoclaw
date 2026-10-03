@@ -415,6 +415,8 @@ export async function buildAgentSelectionOptions(
  * folder-name collisions with numeric suffixes.
  */
 export async function createNewAgentGroup(name: string): Promise<AgentGroup> {
+  const { assertCanCreateAgentGroup } = await import('../../single-agent.js');
+  await assertCanCreateAgentGroup();
   let folder = toFolder(name);
   const baseFolder = folder;
   let suffix = 2;

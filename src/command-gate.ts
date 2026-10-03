@@ -8,6 +8,7 @@
  * - Normal messages: pass through unchanged
  */
 import { hasAdminPrivilege } from './modules/permissions/db/user-roles.js';
+import { readEnvFile } from './env.js';
 import './provider-contracts/index.js';
 import { listProviderHostContracts } from './provider-contracts/registry.js';
 
@@ -21,6 +22,8 @@ const ADMIN_COMMANDS = new Set([
   '/upload-trace',
   ...listProviderHostContracts().flatMap((contract) => contract.commands?.nativeAdmin ?? []),
 ]);
+const DEFAULT_DISCORD_VOICE_COMMAND_PREFIX = '!nc voice';
+let cachedDiscordVoiceCommandPrefix: string | undefined;
 
 /**
  * Classify a message and decide whether it should reach the container.
@@ -36,6 +39,8 @@ export async function gateCommand(content: string, userId: string | null, agentG
   } catch {
     text = content.trim();
   }
+
+  if (isDiscordVoiceCommand(text)) return { action: 'filter' };
 
   if (!text.startsWith('/')) return { action: 'pass' };
 
@@ -57,4 +62,26 @@ export async function gateCommand(content: string, userId: string | null, agentG
 async function isAdmin(userId: string | null, agentGroupId: string): Promise<boolean> {
   if (!userId) return false;
   return hasAdminPrivilege(userId, agentGroupId);
+}
+
+export function isDiscordVoiceCommand(text: string, prefix = getDiscordVoiceCommandPrefix()): boolean {
+  const commandPrefix = prefix.trim();
+  if (!commandPrefix) return false;
+
+  const trimmed = text.trim();
+  if (!trimmed.startsWith(commandPrefix)) return false;
+
+  const next = trimmed.charAt(commandPrefix.length);
+  return next === '' || /\s/.test(next);
+}
+
+function getDiscordVoiceCommandPrefix(): string {
+  const processValue = process.env.DISCORD_VOICE_COMMAND_PREFIX?.trim();
+  if (processValue) return processValue;
+
+  if (cachedDiscordVoiceCommandPrefix !== undefined) return cachedDiscordVoiceCommandPrefix;
+
+  const env = readEnvFile(['DISCORD_VOICE_COMMAND_PREFIX']);
+  cachedDiscordVoiceCommandPrefix = env.DISCORD_VOICE_COMMAND_PREFIX?.trim() || DEFAULT_DISCORD_VOICE_COMMAND_PREFIX;
+  return cachedDiscordVoiceCommandPrefix;
 }

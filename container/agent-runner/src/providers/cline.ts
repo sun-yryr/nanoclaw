@@ -1,0 +1,621 @@
+import { Agent, createTool } from '@cline/sdk';
+import type { AgentRunResult, AgentRuntimeEvent } from '@cline/agents';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { spawnSync } from 'child_process';
+import crypto from 'crypto';
+
+import { buildClineBuiltinTools } from './cline-builtin-tools.js';
+import {
+  isOpaqueSessionId,
+  loadSessionSnapshot,
+  maybeRotateClineContinuation,
+  saveSessionSnapshot,
+  trimClineSnapshotToHistoryBudget,
+} from './cline-sessions.js';
+import { resolveComposedClaudeMd } from '../claude-md-resolve.js';
+import { registerProvider } from './provider-registry.js';
+import type {
+  AgentProvider,
+  AgentQuery,
+  McpServerConfig,
+  ProviderEvent,
+  ProviderOptions,
+  QueryInput,
+} from './types.js';
+import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
+
+/** Local multimodal parts (2.4 QueryInput is text-only). */
+type UserContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
+  | { type: 'image'; source: { type: 'url'; url: string } }
+  | { type: 'document'; source: { type: 'base64'; media_type: string; data: string }; title?: string };
+
+function log(msg: string): void {
+  console.error(`[cline-provider] ${msg}`);
+}
+
+const SENSITIVE_KEY = /(api[_-]?key|authorization|bearer|cookie|credential|password|secret|token)/i;
+
+function redactString(value: string): string {
+  return value
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+    .replace(
+      /(api[_-]?key|authorization|cookie|credential|password|secret|token)(["']?\s*[:=]\s*["']?)[^"',\s}]+/gi,
+      '$1$2[REDACTED]',
+    );
+}
+
+function summarizeUnknown(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') return redactString(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value !== 'object') return String(value);
+  if (seen.has(value)) return '[Circular]';
+  seen.add(value);
+
+  if (value instanceof Error) {
+    const err = value as Error & Record<string, unknown>;
+    const out: Record<string, unknown> = {
+      name: err.name,
+      message: redactString(err.message),
+    };
+    for (const key of ['code', 'status', 'statusCode', 'type', 'requestId', 'response', 'cause']) {
+      if (err[key] !== undefined) out[key] = summarizeUnknown(err[key], seen);
+    }
+    if (err.stack) out.stack = redactString(err.stack).split('\n').slice(0, 8).join('\n');
+    return out;
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (SENSITIVE_KEY.test(key)) {
+      out[key] = '[REDACTED]';
+    } else {
+      out[key] = summarizeUnknown(raw, seen);
+    }
+  }
+  return out;
+}
+
+function describeError(err: unknown, fallback: string): { message: string; classification: string; detail: string } {
+  const record = err && typeof err === 'object' ? (err as Record<string, unknown>) : {};
+  const message = err instanceof Error ? err.message : typeof err === 'string' ? err : fallback;
+  const parts = [
+    err instanceof Error ? err.name : undefined,
+    record.code,
+    record.status,
+    record.statusCode,
+    record.type,
+  ]
+    .filter((part): part is string | number => typeof part === 'string' || typeof part === 'number')
+    .map(String);
+
+  let detail: string;
+  try {
+    detail = JSON.stringify(summarizeUnknown(err));
+  } catch {
+    detail = redactString(String(err));
+  }
+
+  return {
+    message: redactString(message || fallback),
+    classification: parts.length > 0 ? parts.join('/') : 'unclassified',
+    detail,
+  };
+}
+
+// ── Memory tools (inline to avoid ai-sdk / cline-sdk type mismatch) ──
+
+function runMnemon(args: string[], input?: string): { success: boolean; stdout: string; stderr: string } {
+  const result = spawnSync('mnemon', args, {
+    input: input ?? '',
+    encoding: 'utf-8',
+    timeout: 10000,
+    maxBuffer: 1024 * 1024,
+  });
+  const stdout = result.stdout || '';
+  const stderr = result.stderr || '';
+  const success = result.status === 0;
+  if (!success) {
+    log(`mnemon ${args.join(' ')} failed: ${stderr || stdout}`);
+  } else {
+    log(`mnemon ${args.join(' ')} succeeded (${stdout.length} chars)`);
+  }
+  return { success, stdout, stderr };
+}
+
+const memoryReadTool = createTool({
+  name: 'memory_read',
+  description:
+    'Recall relevant memories from the persistent knowledge graph. Use this at the start of each conversation to surface past context. ' +
+    'Pass the user query or task description as the query. Returns structured JSON with relevant insights.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      query: {
+        type: 'string',
+        description:
+          'The topic or question to search memory for. E.g., user preferences, past decisions, project context.',
+      },
+    },
+    required: ['query'],
+  },
+  execute: async ({ query }: { query: unknown }) => {
+    const result = runMnemon(['recall', query as string]);
+    if (!result.success) {
+      return `Memory recall failed: ${result.stderr || result.stdout}`;
+    }
+    if (!result.stdout.trim()) {
+      return 'No relevant memories found.';
+    }
+    return result.stdout;
+  },
+});
+
+const memoryWriteTool = createTool({
+  name: 'memory_write',
+  description:
+    'Save a new insight or update an existing memory in the persistent knowledge graph. Use this when you learn something important ' +
+    'about the user (preferences, facts, decisions, context) that should persist across sessions. ' +
+    'Pass the insight as a concise, factual statement. The binary handles deduplication and linking automatically.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      insight: {
+        type: 'string',
+        description:
+          'The factual insight to remember. E.g., "User prefers TypeScript over Python" or "Project deadline is June 30"',
+      },
+    },
+    required: ['insight'],
+  },
+  execute: async ({ insight }: { insight: unknown }) => {
+    const result = runMnemon(['remember', insight as string]);
+    if (!result.success) {
+      return `Memory save failed: ${result.stderr || result.stdout}`;
+    }
+    return 'Memory saved successfully.';
+  },
+});
+
+// ── MCP Tool Registry ──
+
+interface McpClientEntry {
+  client: Client;
+  serverName: string;
+}
+
+class McpToolRegistry {
+  private clients: McpClientEntry[] = [];
+
+  async init(servers: Record<string, McpServerConfig>): Promise<void> {
+    for (const [serverName, cfg] of Object.entries(servers)) {
+      if (cfg.type === 'http' || !('command' in cfg) || !cfg.command) {
+        log(`Skipping non-stdio MCP server: ${serverName}`);
+        continue;
+      }
+      log(`Starting MCP server: ${serverName} (${cfg.command})`);
+      const transport = new StdioClientTransport({
+        command: cfg.command,
+        args: cfg.args,
+        env: { ...process.env, ...cfg.env } as Record<string, string>,
+      });
+      const client = new Client({ name: 'nanoclaw-cline', version: '1.0.0' });
+      await client.connect(transport);
+      this.clients.push({ client, serverName });
+      log(`MCP server connected: ${serverName}`);
+    }
+  }
+
+  async buildTools(): Promise<ReturnType<typeof createTool>[]> {
+    const tools: ReturnType<typeof createTool>[] = [];
+    for (const { client, serverName } of this.clients) {
+      const response = await client.listTools();
+      for (const t of response.tools) {
+        const toolName = `mcp__${serverName}__${t.name}`;
+        log(`Registering tool: ${toolName}`);
+        tools.push(
+          createTool({
+            name: toolName,
+            description: t.description || '',
+            inputSchema: t.inputSchema as Record<string, unknown>,
+            execute: async (args: unknown) => {
+              log(`Executing tool: ${toolName} with args: ${JSON.stringify(args)}`);
+              const result = await client.callTool({
+                name: t.name,
+                arguments: args as { [x: string]: unknown },
+              });
+              log(`Tool result: ${JSON.stringify(result).substring(0, 200)}...`);
+              return JSON.stringify(result);
+            },
+          }),
+        );
+      }
+    }
+    return tools;
+  }
+
+  async close(): Promise<void> {
+    for (const { client } of this.clients) {
+      try {
+        await client.close();
+      } catch (err) {
+        log(`Error closing MCP client: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    this.clients = [];
+  }
+}
+
+// ── Provider ──
+
+export class ClineProvider implements AgentProvider {
+  readonly supportsNativeSlashCommands = false;
+  private mcpServers: Record<string, McpServerConfig>;
+
+  constructor(options: ProviderOptions = {}) {
+    this.mcpServers = options.mcpServers ?? {};
+  }
+
+  registerMemorySessionHook(_hook: MemorySessionHookRegistration, _memory?: unknown): void {
+    // Cline uses mnemon via memory_read/memory_write tools, not Claude session hooks.
+  }
+
+  isSessionInvalid(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    return /no conversation found|session.*not found|NotFoundError|missing transcript|ENOENT|401|403|Unauthorized|api key|model not found/i.test(
+      msg,
+    );
+  }
+
+  /**
+   * Claude-shaped cold-resume guard: drop oversized / stale / legacy
+   * continuations before we try to reload them.
+   */
+  maybeRotateContinuation(continuation: string): string | null {
+    return maybeRotateClineContinuation(continuation);
+  }
+
+  query(input: QueryInput): AgentQuery {
+    log('query() called');
+    log(`ENV: OPENCODE_GO_API_KEY=${process.env.OPENCODE_GO_API_KEY ? '***' : 'undefined'}`);
+    log(`ENV: CLINE_BASE_URL=${process.env.CLINE_BASE_URL}`);
+    log(`ENV: CLINE_MODEL=${process.env.CLINE_MODEL}`);
+    log(`ENV: OPENCODE_MODEL=${process.env.OPENCODE_MODEL}`);
+
+    const baseUrl = process.env.CLINE_BASE_URL || 'https://opencode.ai/zen/go/v1';
+    const modelId = process.env.CLINE_MODEL || process.env.OPENCODE_MODEL || 'opencode-go/kimi-k2.6';
+    // OneCLI generic-secret proxy overwrites the Authorization header on the
+    // wire, so the container only needs a placeholder value to make the SDK
+    // emit the header in the first place.
+    const apiKey = process.env.OPENCODE_GO_API_KEY || 'placeholder';
+
+    log(`Creating Agent with baseUrl=${baseUrl}, modelId=${modelId}`);
+
+    const pending: Array<{ text: string; userContent?: UserContentPart[] }> = [];
+    let waiting: (() => void) | null = null;
+    let ended = false;
+    let aborted = false;
+
+    const events: ProviderEvent[] = [];
+    let eventWaiting: (() => void) | null = null;
+
+    const kick = (): void => {
+      waiting?.();
+    };
+
+    const self = this;
+
+    async function* gen(): AsyncGenerator<ProviderEvent> {
+      log('gen() started');
+      let mcpRegistry: McpToolRegistry | null = null;
+      try {
+        const builtinTools = buildClineBuiltinTools(input.cwd);
+        log(`Loaded ${builtinTools.length} Cline built-in tools: ${builtinTools.map((t) => t.name).join(', ')}`);
+
+        let tools: ReturnType<typeof createTool>[] = [...builtinTools, memoryReadTool, memoryWriteTool];
+        if (Object.keys(self.mcpServers).length > 0) {
+          mcpRegistry = new McpToolRegistry();
+          await mcpRegistry.init(self.mcpServers);
+          const mcpTools = await mcpRegistry.buildTools();
+          tools = [...tools, ...mcpTools];
+          log(`Loaded ${mcpTools.length} MCP tools`);
+        }
+
+        const claudeMd = resolveComposedClaudeMd(input.cwd);
+        const systemPrompt = [input.systemContext?.instructions, claudeMd].filter(Boolean).join('\n\n');
+        if (claudeMd) {
+          log(`Resolved CLAUDE.md instructions (${claudeMd.length} chars)`);
+        }
+
+        const agent = new Agent({
+          providerId: 'openai-compatible',
+          modelId,
+          apiKey,
+          baseUrl,
+          systemPrompt: systemPrompt || undefined,
+          tools,
+          maxIterations: 50,
+        });
+
+        // Claude-shaped resume: continuation is an opaque session id; the
+        // conversation body lives on disk under ~/.claude/cline-sessions/.
+        let sessionId =
+          input.continuation && isOpaqueSessionId(input.continuation)
+            ? input.continuation
+            : crypto.randomUUID();
+
+        if (input.continuation && isOpaqueSessionId(input.continuation)) {
+          const snapshot = loadSessionSnapshot(input.continuation);
+          if (snapshot?.messages && snapshot.messages.length > 0) {
+            agent.restore(snapshot.messages);
+            log(`Restored ${snapshot.messages.length} messages from session ${input.continuation}`);
+          } else {
+            // Missing / empty transcript — start a fresh session id so we don't
+            // keep pointing session_state at a dead file.
+            sessionId = crypto.randomUUID();
+            log(`No usable transcript for ${input.continuation}; starting fresh session ${sessionId}`);
+          }
+        } else if (input.continuation) {
+          sessionId = crypto.randomUUID();
+          log(`Ignoring non-opaque continuation; starting fresh session ${sessionId}`);
+        }
+
+        const persist = (): void => {
+          try {
+            const snapshot = agent.snapshot();
+            const { removed, maxTokens } = trimClineSnapshotToHistoryBudget(snapshot);
+            saveSessionSnapshot(sessionId, snapshot);
+            if (removed > 0) {
+              agent.restore(snapshot.messages);
+              log(
+                `Trimmed ${removed} old messages from the active session to stay within the ${maxTokens.toLocaleString()}-token history budget`,
+              );
+            }
+          } catch (err) {
+            log(`Failed to persist session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        };
+
+        agent.subscribe((event: AgentRuntimeEvent) => {
+          if (aborted) return;
+          let providerEvent: ProviderEvent | null = null;
+
+          switch (event.type) {
+            case 'run-started':
+            case 'turn-started':
+            case 'tool-started':
+            case 'tool-finished':
+            case 'usage-updated':
+            case 'message-added':
+            case 'turn-finished':
+            case 'assistant-text-delta':
+            case 'assistant-reasoning-delta':
+              providerEvent = { type: 'activity' };
+              break;
+            case 'assistant-message':
+              providerEvent = { type: 'activity' };
+              break;
+            case 'run-finished': {
+              const result = (event as any).result;
+              providerEvent = { type: 'result', text: result?.outputText ?? null };
+              break;
+            }
+            case 'run-failed': {
+              const error = (event as any).error;
+              const described = describeError(error, 'Run failed');
+              log(`run-failed error detail: ${described.detail}`);
+              providerEvent = {
+                type: 'error',
+                message: described.message,
+                retryable: true,
+                classification: described.classification,
+              };
+              break;
+            }
+            case 'status-notice': {
+              const notice = (event as any).message;
+              providerEvent = { type: 'progress', message: notice || 'Status notice' };
+              break;
+            }
+          }
+
+          if (providerEvent) {
+            events.push(providerEvent);
+            eventWaiting?.();
+          }
+        });
+
+        // Opaque id only — same contract as Claude's session_id. Persist the
+        // body to disk after each turn (SDK doesn't do it for us).
+        log(`Yielding init with session ${sessionId}`);
+        yield { type: 'init', continuation: sessionId };
+
+        // ── First turn ──
+        let runDone = false;
+        let runResult: Awaited<ReturnType<typeof agent.run>> | undefined;
+        const firstInput = toAgentInput(input.prompt);
+        const runPromise = agent
+          .run(firstInput)
+          .then((r: AgentRunResult) => {
+            runDone = true;
+            runResult = r;
+            eventWaiting?.();
+            return r;
+          })
+          .catch((err: unknown) => {
+            const described = describeError(err, 'Run failed');
+            log(`agent.run rejected: ${described.detail}`);
+            events.push({
+              type: 'error',
+              message: described.message,
+              retryable: true,
+              classification: described.classification,
+            });
+            runDone = true;
+            eventWaiting?.();
+          });
+        void runPromise;
+
+        while (!runDone) {
+          while (events.length > 0) {
+            yield events.shift()!;
+          }
+          if (runDone) break;
+          await new Promise<void>((r) => {
+            eventWaiting = r;
+          });
+        }
+
+        while (events.length > 0) {
+          yield events.shift()!;
+        }
+
+        if (runResult) {
+          if (runResult.status !== 'completed') {
+            const described = describeError(runResult.error, 'Run failed');
+            log(`agent.run non-completed status=${runResult.status}: ${described.detail}`);
+            yield {
+              type: 'error',
+              message: described.message,
+              retryable: true,
+              classification: described.classification,
+            };
+          }
+        }
+
+        // Persist after the first turn so a mid-session crash still resumes.
+        persist();
+
+        // ── Follow-up turns ──
+        let firstTurn = true;
+        while (firstTurn || pending.length > 0 || !ended) {
+          if (aborted) {
+            log('gen() aborted');
+            return;
+          }
+
+          if (!firstTurn) {
+            while (pending.length === 0 && !ended && !aborted) {
+              log('gen() waiting for input...');
+              await new Promise<void>((resolve) => {
+                waiting = resolve;
+              });
+              waiting = null;
+            }
+
+            if (aborted) {
+              log('gen() aborted after wait');
+              return;
+            }
+            if (pending.length === 0 && ended) {
+              log('gen() ended');
+              break;
+            }
+
+            const followUp = pending.shift()!;
+            log(`Processing follow-up: ${followUp.text.substring(0, 100)}...`);
+
+            let continueDone = false;
+            let continueResult: Awaited<ReturnType<typeof agent.continue>> | undefined;
+            const continuePromise = agent
+              .continue(toAgentInput(followUp.text))
+              .then((r: AgentRunResult) => {
+                continueDone = true;
+                continueResult = r;
+                eventWaiting?.();
+                return r;
+              })
+              .catch((err: unknown) => {
+                const described = describeError(err, 'Continue failed');
+                log(`agent.continue rejected: ${described.detail}`);
+                events.push({
+                  type: 'error',
+                  message: described.message,
+                  retryable: true,
+                  classification: described.classification,
+                });
+                continueDone = true;
+                eventWaiting?.();
+              });
+            void continuePromise;
+
+            while (!continueDone) {
+              while (events.length > 0) {
+                yield events.shift()!;
+              }
+              if (continueDone) break;
+              await new Promise<void>((r) => {
+                eventWaiting = r;
+              });
+            }
+
+            while (events.length > 0) {
+              yield events.shift()!;
+            }
+
+            if (continueResult) {
+              if (continueResult.status !== 'completed') {
+                const described = describeError(continueResult.error, 'Continue failed');
+                log(`agent.continue non-completed status=${continueResult.status}: ${described.detail}`);
+                yield {
+                  type: 'error',
+                  message: described.message,
+                  retryable: true,
+                  classification: described.classification,
+                };
+              }
+            }
+
+            persist();
+          }
+
+          firstTurn = false;
+        }
+      } catch (err) {
+        const described = describeError(err, 'Provider error');
+        log(`gen() caught error detail: ${described.detail}`);
+        yield {
+          type: 'error',
+          message: described.message,
+          retryable: true,
+          classification: described.classification,
+        };
+      } finally {
+        if (mcpRegistry) {
+          await mcpRegistry.close();
+          log('MCP registry closed');
+        }
+      }
+      log('gen() exiting');
+    }
+
+    return {
+      push: (message: string) => {
+        log(`push() called: ${message.substring(0, 100)}...`);
+        pending.push({ text: message });
+        kick();
+      },
+      end: () => {
+        log('end() called');
+        ended = true;
+        kick();
+      },
+      events: gen(),
+      abort: () => {
+        log('abort() called');
+        aborted = true;
+        kick();
+      },
+    };
+  }
+}
+
+registerProvider('cline', (opts) => new ClineProvider(opts));
+
+function toAgentInput(prompt: string): string {
+  // 2.4 QueryInput is text-only; multimodal re-attach later via media helpers.
+  return prompt;
+}

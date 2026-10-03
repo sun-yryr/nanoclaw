@@ -524,16 +524,14 @@ async function deliverToAgent(
   effectiveThreadId: string | null,
   wake: boolean,
 ): Promise<void> {
-  // Apply the resolved thread policy (wiring override AND channel declaration
-  // AND adapter capability — resolveThreadPolicy at fanout): thread-enabled
-  // wiring in a group chat → per-thread session regardless of wiring
-  // session_mode. agent-shared preserved (it's a cross-channel directive the
-  // adapter doesn't know about). DMs collapse sub-threads to one session
-  // (is_group=0 short-circuit).
-  let effectiveSessionMode = agent.session_mode;
-  if (threadsEnabled && effectiveSessionMode !== 'agent-shared' && mg.is_group !== 0) {
-    effectiveSessionMode = 'per-thread';
-  }
+  // Single-agent install: honour wiring session_mode by default. Restore the
+  // old "always per-thread in group chats" override with
+  // FORCE_PER_THREAD_IN_GROUP_CHATS=true (see src/single-agent.ts).
+  const { effectiveSessionMode: pickSessionMode } = await import('./single-agent.js');
+  const effectiveSessionMode = pickSessionMode(agent.session_mode, {
+    adapterSupportsThreads: threadsEnabled,
+    isGroup: mg.is_group !== 0,
+  });
 
   const { session, created } = await resolveSession(
     agent.agent_group_id,

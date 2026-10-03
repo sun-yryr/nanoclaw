@@ -26,6 +26,7 @@ import { getGatewayProvider } from './gateway-providers/index.js';
 import { routeInbound } from './router.js';
 import { log } from './log.js';
 import { enforceUpgradeTripwire } from './upgrade-state.js';
+import { acquireHostLock, HostLockError, releaseHostLock } from './host-lock.js';
 
 // Response registry lives in response-registry.ts to break the
 // circular import cycle: src/index.ts imports src/modules/index.js for side
@@ -72,6 +73,17 @@ let stopGatewayAvailabilityMonitor: (() => void) | undefined;
 
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
+
+  // 0. Single-host lock — prevent duplicate outbound delivery from two hosts.
+  try {
+    acquireHostLock();
+  } catch (err) {
+    if (err instanceof HostLockError) {
+      log.fatal('Another NanoClaw host is already running', { existingPid: err.existingPid });
+      process.exit(1);
+    }
+    throw err;
+  }
 
   // 0. Circuit breaker — backoff on rapid restarts
   await enforceStartupBackoff();
@@ -171,6 +183,10 @@ async function main(): Promise<void> {
   const deliveryAdapter = createChannelDeliveryAdapter();
   setDeliveryAdapter(deliveryAdapter);
 
+  // Discord voice companion (no-ops unless DISCORD_VOICE_ENABLED=true).
+  const { startDiscordVoice } = await import('./modules/discord-voice/index.js');
+  await startDiscordVoice();
+
   // 4. Core starts the selected gateway's normalized approval subscription
   // only after persistence and delivery are ready.
   await startGatewayApprovalCoordinator(gatewayProvider, deliveryAdapter, stopGatewaySessionsForUnavailability, {
@@ -221,6 +237,7 @@ async function shutdown(signal: string): Promise<void> {
     await teardownChannelAdapters();
   } finally {
     await closeDb();
+    releaseHostLock();
     // Always reset on graceful shutdown — even if teardown threw, we got here
     // via SIGTERM/SIGINT, not a crash, so the next start shouldn't be counted
     // as one.

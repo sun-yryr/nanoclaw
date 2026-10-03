@@ -197,6 +197,8 @@ registerResource({
           await initGroupFilesystem(existing); // ensure a reused group is fully configured too (idempotent; also repairs a missing workspace folder)
           return existing;
         }
+        const { assertCanCreateAgentGroup } = await import('../../single-agent.js');
+        await assertCanCreateAgentGroup();
         // Fresh-create branch only: a folder on disk with no claiming DB row
         // is deleted-group residue (delete never removes groups/<folder>/) or
         // an operator-placed dir — minting a new id over it would silently

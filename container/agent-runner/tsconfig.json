@@ -10,5 +10,11 @@
     "types": ["bun"]
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "src/**/*.test.ts"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/**/*.test.ts",
+    "src/media/**",
+    "src/memory-tools.ts"
+  ]
 }
