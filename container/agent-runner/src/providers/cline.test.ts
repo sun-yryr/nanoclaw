@@ -1,7 +1,40 @@
 import { describe, expect, it } from 'bun:test';
 
-import { toClineUserContent } from './cline.js';
+import {
+  resolveClineProviderId,
+  resolveClineReasoningEffort,
+  toClineUserContent,
+} from './cline.js';
 import type { UserContentPart } from './types.js';
+
+describe('resolveClineProviderId', () => {
+  it('defaults omitted/empty/chat to openai-compatible', () => {
+    expect(resolveClineProviderId(undefined)).toBe('openai-compatible');
+    expect(resolveClineProviderId(null)).toBe('openai-compatible');
+    expect(resolveClineProviderId('')).toBe('openai-compatible');
+    expect(resolveClineProviderId('chat')).toBe('openai-compatible');
+    expect(resolveClineProviderId('CHAT')).toBe('openai-compatible');
+  });
+
+  it('maps responses to openai-native', () => {
+    expect(resolveClineProviderId('responses')).toBe('openai-native');
+    expect(resolveClineProviderId(' Responses ')).toBe('openai-native');
+  });
+
+  it('throws on unknown values', () => {
+    expect(() => resolveClineProviderId('auto')).toThrow(/Invalid CLINE_API/);
+  });
+});
+
+describe('resolveClineReasoningEffort', () => {
+  it('prefers env over config and passes values through', () => {
+    expect(resolveClineReasoningEffort('high', 'low')).toBe('high');
+    expect(resolveClineReasoningEffort(undefined, 'medium')).toBe('medium');
+    expect(resolveClineReasoningEffort('max', undefined)).toBe('max');
+    expect(resolveClineReasoningEffort('', 'low')).toBe('low');
+    expect(resolveClineReasoningEffort(undefined, undefined)).toBeUndefined();
+  });
+});
 
 describe('toClineUserContent', () => {
   it('converts image_url data URLs to Cline image parts', () => {

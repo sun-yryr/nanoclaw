@@ -68,17 +68,31 @@ if (dotenv.CLINE_BASE_URL) {
 }
 ```
 
-Also pass through when set: `CLINE_MODEL`, `CLINE_TRANSCRIPT_MAX_TOKENS`, `OPENCODE_MODEL`, `MOONSHOT_API_BASE_URL`, `MOONSHOT_API_KEY`.
+Also pass through when set: `CLINE_MODEL`, `CLINE_API`, `CLINE_REASONING_EFFORT`, `CLINE_TRANSCRIPT_MAX_TOKENS`, `OPENCODE_MODEL`, `MOONSHOT_API_BASE_URL`, `MOONSHOT_API_KEY`.
 
 ## Runtime env (.env — do not commit)
 
 | Variable | Role |
 |----------|------|
-| `CLINE_BASE_URL` | OpenAI-compatible API base |
-| `CLINE_MODEL` | Model id |
+| `CLINE_BASE_URL` | API base **without** endpoint suffix (e.g. `https://opencode.ai/zen/go/v1`) |
+| `CLINE_MODEL` | Model id (e.g. `deepseek-v4.1-flash`, `gpt-6-luna`) |
+| `CLINE_API` | `chat` (default) → chat/completions; `responses` → Responses API (Luna/Grok). Do not put `/responses` in the base URL |
+| `CLINE_REASONING_EFFORT` | Optional; passed through to Cline as `reasoningEffort`. Else use `ncl groups config update --effort` |
 | `OPENCODE_MODEL` | Fallback model id |
 | `CLINE_TRANSCRIPT_*` | History trim / rotate |
 | `MOONSHOT_*` | Video upload when base is OpenCode Go (no `/files`) |
+
+```bash
+# Chat Completions (DeepSeek, Kimi, …)
+CLINE_BASE_URL=https://opencode.ai/zen/go/v1
+CLINE_MODEL=deepseek-v4.1-flash
+# CLINE_API omitted = chat
+
+# Responses API (GPT Luna, …)
+CLINE_MODEL=gpt-6-luna
+CLINE_API=responses
+# optional: CLINE_REASONING_EFFORT=high
+```
 
 OneCLI must have a generic secret whose host pattern matches `CLINE_BASE_URL` hostname and rewrites `Authorization`.
 

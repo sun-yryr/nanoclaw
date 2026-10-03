@@ -17,6 +17,8 @@ registerProviderContainerConfig('cline', () => {
   const dotenv = readEnvFile([
     'CLINE_BASE_URL',
     'CLINE_MODEL',
+    'CLINE_API',
+    'CLINE_REASONING_EFFORT',
     'CLINE_TRANSCRIPT_MAX_TOKENS',
     'OPENCODE_MODEL',
     'MOONSHOT_API_BASE_URL',
@@ -30,6 +32,12 @@ registerProviderContainerConfig('cline', () => {
   }
   if (dotenv.CLINE_MODEL) {
     env.CLINE_MODEL = dotenv.CLINE_MODEL;
+  }
+  if (dotenv.CLINE_API) {
+    env.CLINE_API = dotenv.CLINE_API;
+  }
+  if (dotenv.CLINE_REASONING_EFFORT) {
+    env.CLINE_REASONING_EFFORT = dotenv.CLINE_REASONING_EFFORT;
   }
   if (dotenv.CLINE_TRANSCRIPT_MAX_TOKENS) {
     env.CLINE_TRANSCRIPT_MAX_TOKENS = dotenv.CLINE_TRANSCRIPT_MAX_TOKENS;

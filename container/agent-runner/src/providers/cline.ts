@@ -243,14 +243,45 @@ class McpToolRegistry {
   }
 }
 
+// ── API mode / effort ──
+
+export type ClineApiMode = 'chat' | 'responses';
+
+/**
+ * Map CLINE_API to a Cline SDK providerId.
+ * - omitted / "chat" → openai-compatible (chat/completions)
+ * - "responses" → openai-native (Responses API)
+ * Unknown values throw — no silent fallback.
+ */
+export function resolveClineProviderId(apiEnv?: string | null): 'openai-compatible' | 'openai-native' {
+  const raw = (apiEnv ?? '').trim().toLowerCase();
+  if (!raw || raw === 'chat') return 'openai-compatible';
+  if (raw === 'responses') return 'openai-native';
+  throw new Error(`Invalid CLINE_API=${JSON.stringify(apiEnv)} (expected "chat", "responses", or unset)`);
+}
+
+/** Prefer CLINE_REASONING_EFFORT, then container config effort. Empty → undefined. */
+export function resolveClineReasoningEffort(
+  envEffort?: string | null,
+  configEffort?: string | null,
+): string | undefined {
+  const fromEnv = envEffort?.trim();
+  if (fromEnv) return fromEnv;
+  const fromConfig = configEffort?.trim();
+  if (fromConfig) return fromConfig;
+  return undefined;
+}
+
 // ── Provider ──
 
 export class ClineProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
   private mcpServers: Record<string, McpServerConfig>;
+  private effort?: string;
 
   constructor(options: ProviderOptions = {}) {
     this.mcpServers = options.mcpServers ?? {};
+    this.effort = options.effort;
   }
 
   registerMemorySessionHook(_hook: MemorySessionHookRegistration, _memory?: unknown): void {
@@ -278,6 +309,8 @@ export class ClineProvider implements AgentProvider {
     log(`ENV: CLINE_BASE_URL=${process.env.CLINE_BASE_URL}`);
     log(`ENV: CLINE_MODEL=${process.env.CLINE_MODEL}`);
     log(`ENV: OPENCODE_MODEL=${process.env.OPENCODE_MODEL}`);
+    log(`ENV: CLINE_API=${process.env.CLINE_API ?? '(unset→chat)'}`);
+    log(`ENV: CLINE_REASONING_EFFORT=${process.env.CLINE_REASONING_EFFORT ?? '(unset)'}`);
 
     const baseUrl = process.env.CLINE_BASE_URL || 'https://opencode.ai/zen/go/v1';
     const modelId = process.env.CLINE_MODEL || process.env.OPENCODE_MODEL || 'opencode-go/kimi-k2.6';
@@ -285,8 +318,16 @@ export class ClineProvider implements AgentProvider {
     // wire, so the container only needs a placeholder value to make the SDK
     // emit the header in the first place.
     const apiKey = process.env.OPENCODE_GO_API_KEY || 'placeholder';
+    const providerId = resolveClineProviderId(process.env.CLINE_API);
+    const reasoningEffort = resolveClineReasoningEffort(
+      process.env.CLINE_REASONING_EFFORT,
+      this.effort,
+    );
 
-    log(`Creating Agent with baseUrl=${baseUrl}, modelId=${modelId}`);
+    log(
+      `Creating Agent with providerId=${providerId}, baseUrl=${baseUrl}, modelId=${modelId}` +
+        (reasoningEffort ? `, reasoningEffort=${reasoningEffort}` : ''),
+    );
 
     const pending: Array<{ text: string; userContent?: UserContentPart[] }> = [];
     let waiting: (() => void) | null = null;
@@ -351,7 +392,7 @@ export class ClineProvider implements AgentProvider {
         }
 
         const agent = new Agent({
-          providerId: 'openai-compatible',
+          providerId,
           modelId,
           apiKey,
           baseUrl,
@@ -361,6 +402,8 @@ export class ClineProvider implements AgentProvider {
           headers: {
             'x-opencode-session': sessionId,
           },
+          // Pass through verbatim; invalid values fail at the SDK / upstream.
+          ...(reasoningEffort ? { reasoningEffort: reasoningEffort as 'low' | 'medium' | 'high' | 'xhigh' } : {}),
         });
 
         if (snapshotToRestore?.messages?.length) {
