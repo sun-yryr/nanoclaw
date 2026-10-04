@@ -6,6 +6,7 @@ import { spawnSync } from 'child_process';
 import crypto from 'crypto';
 
 import { buildClineBuiltinTools } from './cline-builtin-tools.js';
+import { composeDeferralAndModelIoHooks, McpToolDeferral } from './cline-mcp-deferral.js';
 import { createModelIoHooks } from './cline-model-io.js';
 import {
   isOpaqueSessionId,
@@ -360,6 +361,15 @@ export class ClineProvider implements AgentProvider {
           log(`Loaded ${mcpTools.length} MCP tools`);
         }
 
+        // External MCP schemas stay out of the model prompt until tool_search
+        // activates them; execute handlers remain registered on the Agent.
+        const deferral = new McpToolDeferral(tools);
+        tools = deferral.allRegisteredTools();
+        log(
+          `MCP deferral: ${deferral.alwaysLoad.length} always-load, ` +
+            `${deferral.deferred.length} deferred, tool_search enabled`,
+        );
+
         const claudeMd = resolveComposedClaudeMd(input.cwd);
         const systemPrompt = [input.systemContext?.instructions, claudeMd].filter(Boolean).join('\n\n');
         if (claudeMd) {
@@ -405,7 +415,11 @@ export class ClineProvider implements AgentProvider {
           },
           // Persist SDK-layer model I/O under /workspace/debug/model-io/
           // (host: data/v2-sessions/<group>/<session>/debug/model-io/).
-          hooks: createModelIoHooks({ providerId, modelId, sessionId }),
+          // Deferral beforeModel runs first so dumps show the filtered set.
+          hooks: composeDeferralAndModelIoHooks(
+            deferral,
+            createModelIoHooks({ providerId, modelId, sessionId }),
+          ),
           // Pass through verbatim; invalid values fail at the SDK / upstream.
           ...(reasoningEffort ? { reasoningEffort: reasoningEffort as 'low' | 'medium' | 'high' | 'xhigh' } : {}),
         });
