@@ -20,6 +20,10 @@ registerProviderContainerConfig('cline', () => {
     'CLINE_API',
     'CLINE_REASONING_EFFORT',
     'CLINE_TRANSCRIPT_MAX_TOKENS',
+    'CLINE_SPAWN_MODEL',
+    'CLINE_SPAWN_API',
+    'CLINE_SPAWN_BASE_URL',
+    'CLINE_SPAWN_MAX_ITERATIONS',
     'OPENCODE_MODEL',
     'MOONSHOT_API_BASE_URL',
     'MOONSHOT_API_KEY',
@@ -41,6 +45,21 @@ registerProviderContainerConfig('cline', () => {
   }
   if (dotenv.CLINE_TRANSCRIPT_MAX_TOKENS) {
     env.CLINE_TRANSCRIPT_MAX_TOKENS = dotenv.CLINE_TRANSCRIPT_MAX_TOKENS;
+  }
+  if (dotenv.CLINE_SPAWN_MODEL) {
+    env.CLINE_SPAWN_MODEL = dotenv.CLINE_SPAWN_MODEL;
+  }
+  if (dotenv.CLINE_SPAWN_API) {
+    env.CLINE_SPAWN_API = dotenv.CLINE_SPAWN_API;
+  }
+  if (dotenv.CLINE_SPAWN_BASE_URL) {
+    env.CLINE_SPAWN_BASE_URL = dotenv.CLINE_SPAWN_BASE_URL;
+    // Child may hit a different host than the parent; still need a Bearer
+    // placeholder so OneCLI can rewrite Authorization for that hostname.
+    env.OPENCODE_GO_API_KEY = env.OPENCODE_GO_API_KEY || 'placeholder';
+  }
+  if (dotenv.CLINE_SPAWN_MAX_ITERATIONS) {
+    env.CLINE_SPAWN_MAX_ITERATIONS = dotenv.CLINE_SPAWN_MAX_ITERATIONS;
   }
   if (dotenv.OPENCODE_MODEL) {
     env.OPENCODE_MODEL = dotenv.OPENCODE_MODEL;

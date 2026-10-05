@@ -5,7 +5,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { spawnSync } from 'child_process';
 import crypto from 'crypto';
 
-import { buildClineBuiltinTools } from './cline-builtin-tools.js';
+import { buildClineBuiltinTools, buildClineParentToolsWithSpawn } from './cline-builtin-tools.js';
 import { composeDeferralAndModelIoHooks, McpToolDeferral } from './cline-mcp-deferral.js';
 import { createModelIoHooks } from './cline-model-io.js';
 import {
@@ -15,6 +15,11 @@ import {
   saveSessionSnapshot,
   trimClineSnapshotToHistoryBudget,
 } from './cline-sessions.js';
+import {
+  buildClineSpawnAgentTool,
+  clineSpawnSystemPromptHint,
+  resolveClineSpawnConfig,
+} from './cline-spawn.js';
 import { resolveComposedClaudeMd } from '../claude-md-resolve.js';
 import { registerProvider } from './provider-registry.js';
 import type {
@@ -313,6 +318,11 @@ export class ClineProvider implements AgentProvider {
     log(`ENV: OPENCODE_MODEL=${process.env.OPENCODE_MODEL}`);
     log(`ENV: CLINE_API=${process.env.CLINE_API ?? '(unset→chat)'}`);
     log(`ENV: CLINE_REASONING_EFFORT=${process.env.CLINE_REASONING_EFFORT ?? '(unset)'}`);
+    log(`ENV: CLINE_SPAWN_MODEL=${process.env.CLINE_SPAWN_MODEL ?? '(unset→spawn off)'}`);
+    log(`ENV: CLINE_SPAWN_API=${process.env.CLINE_SPAWN_API ?? '(unset→chat)'}`);
+    log(
+      `ENV: CLINE_SPAWN_BASE_URL=${process.env.CLINE_SPAWN_BASE_URL ?? '(unset→parent CLINE_BASE_URL)'}`,
+    );
 
     const baseUrl = process.env.CLINE_BASE_URL || 'https://opencode.ai/zen/go/v1';
     const modelId = process.env.CLINE_MODEL || process.env.OPENCODE_MODEL || 'opencode-go/kimi-k2.6';
@@ -325,10 +335,21 @@ export class ClineProvider implements AgentProvider {
       process.env.CLINE_REASONING_EFFORT,
       this.effort,
     );
+    const spawnConfig = resolveClineSpawnConfig({
+      spawnModel: process.env.CLINE_SPAWN_MODEL,
+      spawnApi: process.env.CLINE_SPAWN_API,
+      spawnBaseUrl: process.env.CLINE_SPAWN_BASE_URL,
+      parentBaseUrl: baseUrl,
+      apiKey,
+      maxIterations: Number(process.env.CLINE_SPAWN_MAX_ITERATIONS) || undefined,
+    });
 
     log(
       `Creating Agent with providerId=${providerId}, baseUrl=${baseUrl}, modelId=${modelId}` +
-        (reasoningEffort ? `, reasoningEffort=${reasoningEffort}` : ''),
+        (reasoningEffort ? `, reasoningEffort=${reasoningEffort}` : '') +
+        (spawnConfig
+          ? `, spawn=${spawnConfig.modelId}/${spawnConfig.providerId} @ ${spawnConfig.baseUrl}`
+          : ', spawn=off'),
     );
 
     const pending: Array<{ text: string; userContent?: UserContentPart[] }> = [];
@@ -349,10 +370,17 @@ export class ClineProvider implements AgentProvider {
       log('gen() started');
       let mcpRegistry: McpToolRegistry | null = null;
       try {
-        const builtinTools = buildClineBuiltinTools(input.cwd);
-        log(`Loaded ${builtinTools.length} Cline built-in tools: ${builtinTools.map((t) => t.name).join(', ')}`);
+        // With spawn: parent keeps MCP + ask/submit + memory + spawn_agent only.
+        // File/shell/web/edit/skills run on the cheaper child via spawn_agent.
+        const hostTools = spawnConfig
+          ? buildClineParentToolsWithSpawn(input.cwd)
+          : buildClineBuiltinTools(input.cwd);
+        log(
+          `Loaded ${hostTools.length} host tools (${spawnConfig ? 'spawn-parent' : 'full-builtin'}): ` +
+            `${hostTools.map((t) => t.name).join(', ')}`,
+        );
 
-        let tools: ReturnType<typeof createTool>[] = [...builtinTools, memoryReadTool, memoryWriteTool];
+        let tools: ReturnType<typeof createTool>[] = [...hostTools, memoryReadTool, memoryWriteTool];
         if (Object.keys(self.mcpServers).length > 0) {
           mcpRegistry = new McpToolRegistry();
           await mcpRegistry.init(self.mcpServers);
@@ -361,17 +389,42 @@ export class ClineProvider implements AgentProvider {
           log(`Loaded ${mcpTools.length} MCP tools`);
         }
 
+        // Always register spawn_agent before MCP deferral so beforeModel's
+        // always-load set includes it every turn.
+        if (spawnConfig) {
+          const spawnTool = buildClineSpawnAgentTool({
+            spawn: spawnConfig,
+            cwd: input.cwd,
+            // Children get full builtins + memory, not MCP / spawn / ask_question.
+            extraChildTools: [memoryReadTool, memoryWriteTool],
+            log,
+          });
+          tools = [...tools, spawnTool];
+          log(
+            `spawn_agent enabled → child model=${spawnConfig.modelId} baseUrl=${spawnConfig.baseUrl}`,
+          );
+        }
+
         // External MCP schemas stay out of the model prompt until tool_search
         // activates them; execute handlers remain registered on the Agent.
         const deferral = new McpToolDeferral(tools);
         tools = deferral.allRegisteredTools();
         log(
           `MCP deferral: ${deferral.alwaysLoad.length} always-load, ` +
-            `${deferral.deferred.length} deferred, tool_search enabled`,
+            `${deferral.deferred.length} deferred, tool_search enabled` +
+            (spawnConfig && deferral.alwaysLoad.some((t) => t.name === 'spawn_agent')
+              ? ', spawn_agent in always-load'
+              : ''),
         );
 
         const claudeMd = resolveComposedClaudeMd(input.cwd);
-        const systemPrompt = [input.systemContext?.instructions, claudeMd].filter(Boolean).join('\n\n');
+        const systemPrompt = [
+          input.systemContext?.instructions,
+          claudeMd,
+          spawnConfig ? clineSpawnSystemPromptHint(spawnConfig.modelId) : '',
+        ]
+          .filter(Boolean)
+          .join('\n\n');
         if (claudeMd) {
           log(`Resolved CLAUDE.md instructions (${claudeMd.length} chars)`);
         }

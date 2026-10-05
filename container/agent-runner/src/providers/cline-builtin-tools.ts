@@ -191,6 +191,46 @@ export function buildClineBuiltinTools(cwd: string): AgentTool[] {
   return mergeTools(main, patch, ask, [createSkillsTool(catalog)]);
 }
 
+/**
+ * Parent tools when spawn_agent is enabled: keep user I/O + turn completion only.
+ * File/shell/web/edit/skills go to the child via spawn_agent to save parent tokens.
+ * (ask_question and submit_and_exit are mutually exclusive in one createDefaultTools
+ * call, so we merge two passes — same pattern as buildClineBuiltinTools.)
+ */
+export function buildClineParentToolsWithSpawn(cwd: string): AgentTool[] {
+  const executors = {
+    ...createDefaultExecutors(),
+    askQuestion: askQuestionViaChannel,
+    submit: async (summary: string, _verified: boolean) => summary,
+  };
+
+  const base = {
+    executors,
+    cwd,
+    enableReadFiles: false,
+    enableSearch: false,
+    enableBash: false,
+    enableWebFetch: false,
+    enableSkills: false,
+    enableEditor: false,
+    enableApplyPatch: false,
+  } as const;
+
+  const submit = createDefaultTools({
+    ...base,
+    enableAskQuestion: false,
+    enableSubmitAndExit: true,
+  });
+
+  const ask = createDefaultTools({
+    ...base,
+    enableAskQuestion: true,
+    enableSubmitAndExit: false,
+  });
+
+  return mergeTools(submit, ask);
+}
+
 export function expectedClineBuiltinToolNames(): readonly string[] {
   return ALL_DEFAULT_TOOL_NAMES;
 }
