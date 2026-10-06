@@ -7,6 +7,7 @@ import crypto from 'crypto';
 
 import { buildClineBuiltinTools, buildClineParentToolsWithSpawn } from './cline-builtin-tools.js';
 import { composeDeferralAndModelIoHooks, McpToolDeferral } from './cline-mcp-deferral.js';
+import { McpRetryGuard } from './cline-mcp-retry.js';
 import { createModelIoHooks } from './cline-model-io.js';
 import {
   isOpaqueSessionId,
@@ -191,6 +192,7 @@ interface McpClientEntry {
 
 class McpToolRegistry {
   private clients: McpClientEntry[] = [];
+  private readonly retryGuard = new McpRetryGuard();
 
   async init(servers: Record<string, McpServerConfig>): Promise<void> {
     for (const [serverName, cfg] of Object.entries(servers)) {
@@ -213,6 +215,7 @@ class McpToolRegistry {
 
   async buildTools(): Promise<ReturnType<typeof createTool>[]> {
     const tools: ReturnType<typeof createTool>[] = [];
+    const retryGuard = this.retryGuard;
     for (const { client, serverName } of this.clients) {
       const response = await client.listTools();
       for (const t of response.tools) {
@@ -224,13 +227,16 @@ class McpToolRegistry {
             description: t.description || '',
             inputSchema: t.inputSchema as Record<string, unknown>,
             execute: async (args: unknown) => {
-              log(`Executing tool: ${toolName} with args: ${JSON.stringify(args)}`);
-              const result = await client.callTool({
-                name: t.name,
-                arguments: args as { [x: string]: unknown },
+              return retryGuard.run(toolName, args, async () => {
+                log(`Executing tool: ${toolName} with args: ${JSON.stringify(args)}`);
+                const result = await client.callTool({
+                  name: t.name,
+                  arguments: args as { [x: string]: unknown },
+                });
+                const text = JSON.stringify(result);
+                log(`Tool result: ${text.substring(0, 200)}...`);
+                return text;
               });
-              log(`Tool result: ${JSON.stringify(result).substring(0, 200)}...`);
-              return JSON.stringify(result);
             },
           }),
         );
