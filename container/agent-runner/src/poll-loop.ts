@@ -40,6 +40,7 @@ import type {
 } from './providers/types.js';
 import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
 import { buildUserContentFromMessages } from './media/index.js';
+import { createTurnStatusPoster, type TurnStatusPoster } from './turn-status.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -440,6 +441,9 @@ export async function processQuery(
   // never re-matched. Dropped at the turn boundary: a block that never
   // closes anywhere is the wrap-nudge's job, not the buffer's.
   let midTurnTail = '';
+  // Progressive channel status (Discord sticky edit via kind=turn_status).
+  // Recreated when a queued follow-up turn is adopted so each turn posts its own.
+  let turnStatus: TurnStatusPoster | null = createTurnStatusPoster(routing);
   // Prompt queue for the exchange hook — each result event consumes the
   // oldest unanswered prompt. Retries append the original user prompt at
   // their position in the provider input queue.
@@ -464,6 +468,7 @@ export async function processQuery(
     taskBlockNudged = next.taskBlockNudged;
     publishReplyRoute(routing);
     answering = true;
+    turnStatus = createTurnStatusPoster(routing);
   };
   // A retry is another provider input, behind any follow-ups already pushed.
   // Preserve its original route, prompt and retry guards until it is answered.
@@ -617,6 +622,10 @@ export async function processQuery(
         // effectively orphaned and the next message started a blank
         // Claude session with no prior context.
         setContinuation(providerName, event.continuation);
+      } else if (event.type === 'progress') {
+        void turnStatus?.update(event.message).catch((err) => {
+          log(`turn-status update failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
       } else if (event.type === 'text') {
         // Assistant text emitted mid-turn (e.g. between tool calls). The
         // final result only carries the LAST assistant text, so complete
@@ -640,6 +649,15 @@ export async function processQuery(
         markCompleted(initialBatchIds);
         const resultText = event.text ?? '';
         const failed = event.isError === true;
+        // Close the sticky status before any final reply so Discord shows
+        // Done, then the answer as a separate bubble.
+        const statusFinishing = turnStatus?.finish(failed ? 'Failed' : undefined);
+        turnStatus = null;
+        if (statusFinishing) {
+          void statusFinishing.catch((err) => {
+            log(`turn-status finish failed: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        }
         if (resultText || failed) {
           const { hasUnwrapped, taskBlocks } = await dispatchResultText(resultText, routing, {
             midTurnSent,
@@ -732,6 +750,13 @@ export async function processQuery(
     done = true;
     const cancelled = endedForCommand || signal?.aborted;
     const errMsg = err instanceof Error ? err.message : String(err);
+    const statusFinishing = turnStatus?.finish(cancelled ? undefined : 'Failed');
+    turnStatus = null;
+    if (statusFinishing) {
+      void statusFinishing.catch((finishErr) => {
+        log(`turn-status finish failed: ${finishErr instanceof Error ? finishErr.message : String(finishErr)}`);
+      });
+    }
     notifyExchangeComplete(onExchangeComplete, {
       prompt: archivePrompts[0] ?? initialPrompt,
       result: `Error: ${errMsg}`,

@@ -34,6 +34,12 @@ import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
+import {
+  clearStickyTurnStatus,
+  getStickyTurnStatusId,
+  setStickyTurnStatusId,
+  turnStatusKey,
+} from './modules/turn-status/sticky.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
 import type { OutboundMessage } from './mailbox/index.js';
@@ -41,6 +47,11 @@ import type { OutboundMessage } from './mailbox/index.js';
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
 const MAX_DELIVERY_ATTEMPTS = 3;
+/**
+ * Sessions whose only outbound so far this process was turn_status progress.
+ * Keeps firstDelivery honest for the first real chat after sticky status.
+ */
+const turnStatusOnlySessions = new Set<string>();
 /**
  * Sessions drained in parallel per poll tick. A visit is one mailbox round
  * trip (read the queue) plus the channel sends; serially, a tick scaled as
@@ -296,14 +307,24 @@ async function drainSession(session: Session): Promise<void> {
 
   for (const msg of pending) {
     try {
+      const priorDeliveredCount = delivered.size;
       const platformMsgId = await deliverMessage(msg, session);
       await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) =>
         mailbox.markDelivered(msg.id, platformMsgId ?? null),
       );
-      const firstDelivery = delivered.size === 0;
+      // turn_status must not burn the session's firstDelivery flag — onboarding
+      // hooks key off the first real chat/chat-sdk bubble, not progress edits.
+      const firstDelivery =
+        (msg.kind === 'chat' || msg.kind === 'chat-sdk') &&
+        (priorDeliveredCount === 0 || turnStatusOnlySessions.has(session.id));
       delivered.add(msg.id);
+      if (msg.kind === 'turn_status' && priorDeliveredCount === 0) {
+        turnStatusOnlySessions.add(session.id);
+      } else if (msg.kind === 'chat' || msg.kind === 'chat-sdk') {
+        turnStatusOnlySessions.delete(session.id);
+      }
       await clearAttemptRow(msg.id);
-      if (msg.kind !== 'system' && msg.channelType !== 'agent') {
+      if (msg.kind !== 'system' && msg.kind !== 'turn_status' && msg.channelType !== 'agent') {
         pauseTypingRefreshAfterDelivery(session.id);
         if (msg.kind !== 'task_log') {
           // Cross-session context: echo the delivered reply into the
@@ -526,6 +547,18 @@ async function deliverMessage(
     return;
   }
 
+  // Progressive turn status: sticky-edit one channel message per destination
+  // so long spawn/tool runs show live progress without flooding new bubbles.
+  if (msg.kind === 'turn_status') {
+    return deliverTurnStatus(msg, session, content, deliverInstance);
+  }
+
+  // A real user-facing reply supersedes the sticky status slot for this
+  // destination so the next turn starts a fresh status bubble.
+  if (msg.kind === 'chat' || msg.kind === 'chat-sdk') {
+    clearStickyTurnStatus(turnStatusKey(session.id, msg.platformId, msg.threadId));
+  }
+
   // Read file attachments from outbox if the content declares files.
   // File I/O lives in session-manager.ts (symmetric with inbound
   // extractAttachmentFiles) — delivery just hands buffers to the adapter.
@@ -554,6 +587,60 @@ async function deliverMessage(
   clearOutbox(session.agent_group_id, session.id, msg.id);
 
   return platformMsgId;
+}
+
+/**
+ * Post or edit the sticky turn-status bubble for this session destination.
+ * First update posts a new message; later updates edit it in place.
+ */
+async function deliverTurnStatus(
+  msg: {
+    id: string;
+    platformId: string | null;
+    channelType: string | null;
+    threadId: string | null;
+  },
+  session: Session,
+  content: Record<string, unknown>,
+  deliverInstance: string | undefined,
+): Promise<string | undefined> {
+  if (!deliveryAdapter || !msg.channelType || !msg.platformId) return;
+  const text = typeof content.text === 'string' ? content.text : '';
+  if (!text) return;
+
+  const key = turnStatusKey(session.id, msg.platformId, msg.threadId);
+  const existing = getStickyTurnStatusId(key);
+  const done = content.done === true;
+
+  if (existing) {
+    const editContent = JSON.stringify({ operation: 'edit', messageId: existing, text });
+    await deliveryAdapter.deliver(
+      msg.channelType,
+      msg.platformId,
+      msg.threadId,
+      'chat',
+      editContent,
+      undefined,
+      deliverInstance,
+    );
+    log.info('Turn status edited', { id: msg.id, platformMsgId: existing, done });
+    if (done) clearStickyTurnStatus(key);
+    return existing;
+  }
+
+  const platformMsgId = await deliveryAdapter.deliver(
+    msg.channelType,
+    msg.platformId,
+    msg.threadId,
+    'chat',
+    JSON.stringify({ text }),
+    undefined,
+    deliverInstance,
+  );
+  if (platformMsgId) setStickyTurnStatusId(key, platformMsgId);
+  log.info('Turn status posted', { id: msg.id, platformMsgId, done });
+  if (done) clearStickyTurnStatus(key);
+  return platformMsgId ?? undefined;
 }
 
 /**

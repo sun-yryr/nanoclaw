@@ -739,3 +739,99 @@ describe('deliverSessionMessages — post-delivery hooks', () => {
     expect(delivered.has('th-2')).toBe(true);
   });
 });
+
+describe('deliverSessionMessages — turn_status sticky edit', () => {
+  beforeEach(async () => {
+    const { resetStickyTurnStatus } = await import('./modules/turn-status/sticky.js');
+    resetStickyTurnStatus();
+  });
+
+  it('posts the first status then edits the same platform message', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    const db = new Database(outboundDbPath('ag-1', session.id));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+       VALUES (?, ?, 'turn_status', 'telegram:123', 'telegram', ?)`,
+    ).run('ts-1', '2026-01-01T00:00:01.000Z', JSON.stringify({ text: 'Working…', done: false }));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+       VALUES (?, ?, 'turn_status', 'telegram:123', 'telegram', ?)`,
+    ).run(
+      'ts-2',
+      '2026-01-01T00:00:02.000Z',
+      JSON.stringify({ text: 'Working…\n→ spawn_agent — research', done: false }),
+    );
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+       VALUES (?, ?, 'turn_status', 'telegram:123', 'telegram', ?)`,
+    ).run(
+      'ts-3',
+      '2026-01-01T00:00:03.000Z',
+      JSON.stringify({ text: 'Working…\n→ spawn_agent — research\nDone', done: true }),
+    );
+    db.close();
+
+    const calls: Array<{ kind: string; content: string }> = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, kind, content) {
+        calls.push({ kind, content });
+        return 'plat-status-1';
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    expect(calls).toHaveLength(3);
+    expect(JSON.parse(calls[0]!.content)).toEqual({ text: 'Working…' });
+    expect(JSON.parse(calls[1]!.content)).toMatchObject({
+      operation: 'edit',
+      messageId: 'plat-status-1',
+    });
+    expect(JSON.parse(calls[2]!.content)).toMatchObject({
+      operation: 'edit',
+      messageId: 'plat-status-1',
+      text: expect.stringContaining('Done'),
+    });
+
+    const delivered = getDeliveredIds(openInboundDb('ag-1', session.id));
+    expect(delivered.has('ts-1')).toBe(true);
+    expect(delivered.has('ts-2')).toBe(true);
+    expect(delivered.has('ts-3')).toBe(true);
+  });
+
+  it('keeps firstDelivery for the first chat after turn_status', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    const db = new Database(outboundDbPath('ag-1', session.id));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+       VALUES ('ts-first', '2026-01-01T00:00:01.000Z', 'turn_status', 'telegram:123', 'telegram', ?)`,
+    ).run(JSON.stringify({ text: 'Working…', done: false }));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+       VALUES ('chat-after', '2026-01-01T00:00:02.000Z', 'chat', 'telegram:123', 'telegram', ?)`,
+    ).run(JSON.stringify({ text: 'hello' }));
+    db.close();
+
+    const seen: Array<{ id: string; firstDelivery: boolean }> = [];
+    registerPostDeliveryHook((msg, _s, info) => {
+      if (msg.id === 'chat-after' || msg.id === 'ts-first') {
+        seen.push({ id: msg.id, firstDelivery: info.firstDelivery });
+      }
+    });
+
+    setDeliveryAdapter({
+      async deliver() {
+        return 'pm';
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    // turn_status skips hooks; the first chat still gets firstDelivery.
+    expect(seen).toEqual([{ id: 'chat-after', firstDelivery: true }]);
+  });
+});
