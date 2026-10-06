@@ -10,6 +10,7 @@ import crypto from 'crypto';
 import {
   createDelegatedAgentConfigProvider,
   createSpawnAgentTool,
+  type AgentHooks,
   type AgentTool,
   type AgentToolContext,
   type SubAgentEndContext,
@@ -17,6 +18,10 @@ import {
 } from '@cline/sdk';
 
 import { buildClineBuiltinTools } from './cline-builtin-tools.js';
+import { McpToolDeferral } from './cline-mcp-deferral.js';
+
+type BeforeModelContext = Parameters<NonNullable<AgentHooks['beforeModel']>>[0];
+type BeforeToolContext = Parameters<NonNullable<AgentHooks['beforeTool']>>[0];
 
 const CHILD_EXCLUDED_TOOLS = new Set(['ask_question', 'spawn_agent']);
 
@@ -104,13 +109,17 @@ function sessionHeaders(): Record<string, string> {
 export interface BuildClineSpawnAgentToolOptions {
   spawn: ClineSpawnConfig;
   cwd: string;
-  /** Extra tools for the child (e.g. memory_read / memory_write). */
+  /**
+   * Tools only the child may use (MCP, memory, …). Parent must not register these.
+   * Child also gets full builtins (minus ask_question / spawn_agent).
+   */
   extraChildTools?: AgentTool[];
   log?: (msg: string) => void;
 }
 
 /**
  * Parent-only spawn_agent tool. Children do not receive this tool (no nesting).
+ * Each spawn gets a fresh MCP deferral so external MCP schemas stay progressive.
  */
 export function buildClineSpawnAgentTool(options: BuildClineSpawnAgentToolOptions): AgentTool {
   const { spawn, cwd, extraChildTools = [], log = () => {} } = options;
@@ -140,10 +149,25 @@ export function buildClineSpawnAgentTool(options: BuildClineSpawnAgentToolOption
     return { ...baseGetRuntime(), headers };
   };
 
+  // Fresh deferral per spawn; hooks close over the active instance.
+  let childDeferral: McpToolDeferral | null = null;
+
   const inner = createSpawnAgentTool({
     configProvider,
     defaultMaxIterations: spawn.maxIterations,
-    createSubAgentTools: () => buildSpawnChildTools(cwd, extraChildTools),
+    createSubAgentTools: () => {
+      const base = buildSpawnChildTools(cwd, extraChildTools);
+      childDeferral = new McpToolDeferral(base);
+      log(
+        `spawn child tools: ${childDeferral.alwaysLoad.length} always-load, ` +
+          `${childDeferral.deferred.length} deferred MCP`,
+      );
+      return childDeferral.allRegisteredTools();
+    },
+    hooks: {
+      beforeModel: (context: BeforeModelContext) => childDeferral?.beforeModel(context),
+      beforeTool: (context: BeforeToolContext) => childDeferral?.beforeTool(context),
+    },
     onSubAgentStart: (ctx: SubAgentStartContext) => {
       log(
         `spawn_agent start subAgentId=${ctx.subAgentId} model=${spawn.modelId} ` +
@@ -171,14 +195,15 @@ export function buildClineSpawnAgentTool(options: BuildClineSpawnAgentToolOption
   };
 }
 
-/** Parent system-prompt when spawn is enabled — force delegation of non-MCP work. */
+/** Parent system-prompt when spawn is enabled — parent orchestrates; child does all tools. */
 export function clineSpawnSystemPromptHint(modelId: string): string {
   return [
-    '## Sub-agents (spawn_agent) — REQUIRED for non-MCP work',
-    `You do NOT have file/shell/web/edit/skills tools. Delegate that work via spawn_agent to a faster model (${modelId}).`,
-    'Keep for yourself: planning, judgment, user questions (ask_question), memory, MCP tools (messaging, cards, etc.), and the final user-facing answer.',
-    'ALWAYS spawn for: web research, weather lookups, reading/searching files, running commands, code edits, skill bodies, summarization, parallelizable chores.',
-    'Pass a tight systemPrompt (role + constraints + what to return) and a concrete task. Prefer one clear spawn over doing the work yourself.',
-    'You may spawn multiple times. Child agents cannot spawn further and cannot ask the user — ask yourself if needed, then spawn again with the answer.',
+    '## Sub-agents (spawn_agent) — REQUIRED for ALL tool use',
+    `You have NO tools except spawn_agent, ask_question, and submit_and_exit. A faster model (${modelId}) has file/shell/web/edit/skills/memory/MCP (send_message, cards, search, fitness, …).`,
+    'For ANY side effect or lookup — messaging Discord/Slack, web search, file ops, shell, memory, MCP — call spawn_agent with an explicit instruction, e.g. "Send this exact text to destination health via mcp__nanoclaw__send_message: …" or "Look up X and return a short summary."',
+    'Keep for yourself only: planning, deciding what to ask the user (ask_question), and composing the final user-facing answer after the child returns.',
+    'Pass a tight systemPrompt (role + constraints + allowed destinations/tools) and a concrete task. Prefer one focused spawn per job; spawn again if you need another step.',
+    'Do not invent tool results. If a child reports failure (auth, lock, empty), tell the user or spawn a different approach — do not retry endlessly yourself.',
+    'Child agents cannot spawn further and cannot ask the user — ask yourself if needed, then spawn again with the answer.',
   ].join('\n');
 }

@@ -109,10 +109,11 @@ describe('buildClineSpawnAgentTool', () => {
 });
 
 describe('clineSpawnSystemPromptHint', () => {
-  it('requires spawn for non-MCP work', () => {
+  it('requires spawn for all tool use including messaging', () => {
     const hint = clineSpawnSystemPromptHint('deepseek-v4.1-flash');
     expect(hint).toContain('deepseek-v4.1-flash');
     expect(hint).toContain('spawn_agent');
-    expect(hint).toContain('do NOT have file/shell/web');
+    expect(hint).toContain('ALL tool use');
+    expect(hint).toContain('send_message');
   });
 });

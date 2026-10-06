@@ -20,6 +20,7 @@ import {
   clineSpawnSystemPromptHint,
   resolveClineSpawnConfig,
 } from './cline-spawn.js';
+import { formatToolStatusLine } from '../turn-status.js';
 import { resolveComposedClaudeMd } from '../claude-md-resolve.js';
 import { registerProvider } from './provider-registry.js';
 import type {
@@ -370,52 +371,51 @@ export class ClineProvider implements AgentProvider {
       log('gen() started');
       let mcpRegistry: McpToolRegistry | null = null;
       try {
-        // With spawn: parent keeps MCP + ask/submit + memory + spawn_agent only.
-        // File/shell/web/edit/skills run on the cheaper child via spawn_agent.
-        const hostTools = spawnConfig
-          ? buildClineParentToolsWithSpawn(input.cwd)
-          : buildClineBuiltinTools(input.cwd);
-        log(
-          `Loaded ${hostTools.length} host tools (${spawnConfig ? 'spawn-parent' : 'full-builtin'}): ` +
-            `${hostTools.map((t) => t.name).join(', ')}`,
-        );
-
-        let tools: ReturnType<typeof createTool>[] = [...hostTools, memoryReadTool, memoryWriteTool];
+        // Build MCP once. With spawn: parent never sees these — only the child does.
+        let mcpTools: ReturnType<typeof createTool>[] = [];
         if (Object.keys(self.mcpServers).length > 0) {
           mcpRegistry = new McpToolRegistry();
           await mcpRegistry.init(self.mcpServers);
-          const mcpTools = await mcpRegistry.buildTools();
-          tools = [...tools, ...mcpTools];
+          mcpTools = await mcpRegistry.buildTools();
           log(`Loaded ${mcpTools.length} MCP tools`);
         }
 
-        // Always register spawn_agent before MCP deferral so beforeModel's
-        // always-load set includes it every turn.
+        let tools: ReturnType<typeof createTool>[];
+        let deferral: McpToolDeferral;
+
         if (spawnConfig) {
+          // Parent = orchestrator only: ask/submit + spawn_agent.
+          // Child = builtins + memory + all MCP (with its own deferral per spawn).
+          const hostTools = buildClineParentToolsWithSpawn(input.cwd);
           const spawnTool = buildClineSpawnAgentTool({
             spawn: spawnConfig,
             cwd: input.cwd,
-            // Children get full builtins + memory, not MCP / spawn / ask_question.
-            extraChildTools: [memoryReadTool, memoryWriteTool],
+            extraChildTools: [memoryReadTool, memoryWriteTool, ...mcpTools],
             log,
           });
-          tools = [...tools, spawnTool];
+          tools = [...hostTools, spawnTool];
+          // No MCP on parent → deferral is a no-op pass-through of always-load tools.
+          deferral = new McpToolDeferral(tools);
+          tools = deferral.allRegisteredTools();
           log(
-            `spawn_agent enabled → child model=${spawnConfig.modelId} baseUrl=${spawnConfig.baseUrl}`,
+            `spawn-parent tools: ${tools.map((t) => t.name).join(', ')} ` +
+              `(child model=${spawnConfig.modelId} @ ${spawnConfig.baseUrl}; MCP×${mcpTools.length} on child only)`,
+          );
+        } else {
+          const builtinTools = buildClineBuiltinTools(input.cwd);
+          tools = [...builtinTools, memoryReadTool, memoryWriteTool, ...mcpTools];
+          // External MCP schemas stay out of the model prompt until tool_search
+          // activates them; execute handlers remain registered on the Agent.
+          deferral = new McpToolDeferral(tools);
+          tools = deferral.allRegisteredTools();
+          log(
+            `Loaded ${builtinTools.length} Cline built-in tools: ${builtinTools.map((t) => t.name).join(', ')}`,
+          );
+          log(
+            `MCP deferral: ${deferral.alwaysLoad.length} always-load, ` +
+              `${deferral.deferred.length} deferred, tool_search enabled`,
           );
         }
-
-        // External MCP schemas stay out of the model prompt until tool_search
-        // activates them; execute handlers remain registered on the Agent.
-        const deferral = new McpToolDeferral(tools);
-        tools = deferral.allRegisteredTools();
-        log(
-          `MCP deferral: ${deferral.alwaysLoad.length} always-load, ` +
-            `${deferral.deferred.length} deferred, tool_search enabled` +
-            (spawnConfig && deferral.alwaysLoad.some((t) => t.name === 'spawn_agent')
-              ? ', spawn_agent in always-load'
-              : ''),
-        );
 
         const claudeMd = resolveComposedClaudeMd(input.cwd);
         const systemPrompt = [
@@ -504,16 +504,27 @@ export class ClineProvider implements AgentProvider {
 
           switch (event.type) {
             case 'run-started':
-            case 'turn-started':
+              events.push({ type: 'activity' });
+              events.push({ type: 'progress', message: 'Working…' });
+              break;
             case 'tool-started':
-            case 'tool-finished':
+            case 'tool-finished': {
+              events.push({ type: 'activity' });
+              const toolCall = (event as { toolCall?: { toolName?: string; input?: unknown } }).toolCall;
+              const line = formatToolStatusLine(
+                event.type === 'tool-started' ? 'start' : 'end',
+                toolCall?.toolName ?? 'tool',
+                toolCall?.input,
+              );
+              if (line) events.push({ type: 'progress', message: line });
+              break;
+            }
+            case 'turn-started':
             case 'usage-updated':
             case 'message-added':
             case 'turn-finished':
             case 'assistant-text-delta':
             case 'assistant-reasoning-delta':
-              providerEvent = { type: 'activity' };
-              break;
             case 'assistant-message':
               providerEvent = { type: 'activity' };
               break;
@@ -543,8 +554,9 @@ export class ClineProvider implements AgentProvider {
 
           if (providerEvent) {
             events.push(providerEvent);
-            eventWaiting?.();
           }
+          // Wake the generator even when we pushed activity/progress directly above.
+          if (events.length > 0) eventWaiting?.();
         });
 
         // Opaque id only — same contract as Claude's session_id. Persist the
