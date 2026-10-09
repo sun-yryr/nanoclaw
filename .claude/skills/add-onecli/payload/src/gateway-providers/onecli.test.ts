@@ -132,9 +132,9 @@ describe('OneCLI gateway package', () => {
       await vi.waitFor(() => expect(callbacksSettled).toBe(requests.length));
       expect(decisions.sort((a, b) => a.id.localeCompare(b.id))).toEqual([
         { id: `${owned}-fresh`, decision: 'approve' },
-        { id: `${owned}-stale`, decision: 'deny' },
+        { id: `${owned}-stale`, decision: 'approve' },
       ]);
-      expect(decide).toHaveBeenCalledTimes(1);
+      expect(decide).toHaveBeenCalledTimes(2);
     } finally {
       controller.abort();
       await running;
@@ -265,7 +265,9 @@ describe('OneCLI gateway package', () => {
   });
 
   it('translates native approvals once and stops the subscription on cancellation', async () => {
-    const decide = vi.fn(async (_request: GatewayApprovalRequest) => 'approve' as const);
+    const decide = vi.fn(async (request: GatewayApprovalRequest) =>
+      request.id === 'leave-pending' ? ('unavailable' as const) : ('approve' as const),
+    );
     const controller = new AbortController();
     const subscription = subscribe(decide, controller.signal);
     await vi.waitFor(() => expect(sdk.manualApproval).toBeTypeOf('function'));
@@ -300,13 +302,27 @@ describe('OneCLI gateway package', () => {
       sdk.manualApproval!({
         id: 'stale',
         createdAt: new Date(0).toISOString(),
+        expiresAt: new Date(Date.now() + 30_000).toISOString(),
         method: 'GET',
         host: 'api.example.test',
         path: '/',
         agent: { name: 'Group One', externalId: 'g1' },
       }),
-    ).resolves.toBe('deny');
-    expect(decide).toHaveBeenCalledTimes(1);
+    ).resolves.toBe('approve');
+    expect(decide).toHaveBeenCalledTimes(2);
+
+    await expect(
+      sdk.manualApproval!({
+        id: 'leave-pending',
+        createdAt: new Date(Date.now() + 1_000).toISOString(),
+        expiresAt: new Date(Date.now() + 30_000).toISOString(),
+        method: 'POST',
+        host: 'api.example.test',
+        path: '/hold',
+        agent: { name: 'Group One', externalId: 'g1' },
+      }),
+    ).rejects.toThrow('leave pending');
+    expect(decide).toHaveBeenCalledTimes(3);
 
     controller.abort();
     await subscription;

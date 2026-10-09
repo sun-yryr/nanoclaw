@@ -167,7 +167,7 @@ describe('gateway approval coordinator', () => {
       expect(row?.question).toBe(card.question);
     });
     await coordinator.stopGatewayApprovalCoordinator();
-    expect(await pending).toBe('deny');
+    expect(await pending).toBe('unavailable');
   });
 
   it.each(['first-gateway', 'second-gateway'])('allows configured reads without cards for %s', async (kind) => {
@@ -199,7 +199,7 @@ describe('gateway approval coordinator', () => {
       );
       await vi.waitFor(() => expect(delivered).toHaveLength(1));
       await coordinator.stopGatewayApprovalCoordinator();
-      expect(await pending).toBe('deny');
+      expect(await pending).toBe('unavailable');
     },
   );
 
@@ -224,7 +224,7 @@ describe('gateway approval coordinator', () => {
     const pending = decide(request(overrides));
     await vi.waitFor(() => expect(delivered).toHaveLength(1));
     await coordinator.stopGatewayApprovalCoordinator();
-    expect(await pending).toBe('deny');
+    expect(await pending).toBe('unavailable');
   });
 
   it.each([
@@ -413,7 +413,7 @@ describe('gateway approval coordinator', () => {
     await expect(decide(request({ id: 'overload' }))).resolves.toBe('deny');
     await expect(decide(request({ id: 'wrong-session', runtimeIdentity: 'spoofed' }))).resolves.toBe('deny');
     await coordinator.stopGatewayApprovalCoordinator();
-    await expect(held).resolves.toBe('deny');
+    await expect(held).resolves.toBe('unavailable');
   });
 
   it('uses the provider expiry instead of shortening its approval window', async () => {

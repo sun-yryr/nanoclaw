@@ -137,13 +137,12 @@ async function ensureSession(input: GatewaySessionInput, signal: AbortSignal): P
 }
 
 async function subscribeApprovals(
-  decide: (request: GatewayApprovalRequest) => Promise<'approve' | 'deny'>,
+  decide: (request: GatewayApprovalRequest) => Promise<'approve' | 'deny' | 'unavailable'>,
   signal: AbortSignal,
   _resolved?: (requestId: string) => Promise<void>,
   scope?: GatewayApprovalScope,
 ): Promise<void> {
   if (!scope) throw new Error('OneCLI approval subscription requires installation ownership scope');
-  const subscribedAt = Date.now();
   const client = new ApprovalClient(
     onecliUrl || 'https://api.onecli.sh',
     onecliApiKey || '',
@@ -161,18 +160,38 @@ async function subscribeApprovals(
   signal.addEventListener('abort', stop, { once: true });
   try {
     // Unlike configureManualApproval, start exposes gateway-URL discovery failures.
+    // ApprovalClient long-polls the gateway (:10255)/v1/approvals/pending — the same
+    // Manual Approval API as configureManualApproval, compatible with OneCLI ≥1.15
+    // including self-hosted 1.41.0. Throwing from the callback submits no decision
+    // and leaves the request pending (restart recovery / foreign installs).
     await client.start(async (request: ApprovalRequest) => {
-      // The local gateway poll is shared by installations. Throwing from the
-      // pinned SDK callback submits no decision and leaves the request pending.
-      // Keep this outside the deny-on-translation-error block, even for stale
-      // requests: this copy has no authority over another copy's requests.
+      // The local gateway poll is shared by installations. Keep ownership
+      // checks outside the deny-on-translation-error block: this copy has no
+      // authority over another copy's requests.
       if (!(await scope.ownsAgentGroup(request.agent?.externalId ?? ''))) {
         throw new Error('OneCLI approval belongs to another installation');
       }
-      if (signal.aborted || Date.parse(request.createdAt) < subscribedAt) return 'deny';
+      if (signal.aborted) {
+        throw new Error('OneCLI approval subscription aborted');
+      }
       try {
-        return await decide(toGatewayApprovalRequest(request));
+        const decision = await decide(toGatewayApprovalRequest(request));
+        // 'unavailable' must not become a gateway deny — leave the hold for the
+        // next poll (host restart, bridge blip) so Discord can re-attach.
+        if (decision === 'unavailable') {
+          throw new Error('OneCLI approval unavailable — leave pending');
+        }
+        return decision;
       } catch (err) {
+        if (
+          signal.aborted ||
+          (err instanceof Error &&
+            (err.message === 'OneCLI approval unavailable — leave pending' ||
+              err.message === 'OneCLI approval subscription aborted' ||
+              err.message === 'OneCLI approval belongs to another installation'))
+        ) {
+          throw err;
+        }
         log.error('OneCLI approval translation failed closed', { requestId: request.id, err });
         return 'deny';
       }

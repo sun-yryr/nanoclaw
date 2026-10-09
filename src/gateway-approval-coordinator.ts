@@ -263,10 +263,13 @@ export async function stopGatewayApprovalCoordinator(): Promise<void> {
   const stoppedHealth = publishHealth().catch(() => {});
   if (expirySweep) clearInterval(expirySweep);
   expirySweep = null;
+  // Settle in-flight holds as unavailable *before* aborting the provider
+  // subscription so adapters (e.g. OneCLI) can throw and leave gateway
+  // requests pending for restart re-delivery — abort-first would race a deny.
+  await denyAll('host restarted');
   activeController.abort();
   initialReady?.();
   initialReady = undefined;
-  await denyAll('host restarted');
   if (activeSubscription) {
     let timer: NodeJS.Timeout | undefined;
     await Promise.race([
@@ -399,7 +402,11 @@ async function processGatewayRequest(
       }
       return armPending(existing.approval_id, requestKey, Math.min(savedDeadline, deadline), requestBinding(request));
     }
-    if (createdAtMs < startedAt && !approvalSource?.durable) return unavailableDecision();
+    // Pre-start *policy* holds re-deliver after a host restart (OneCLI keeps
+    // them pending). Pre-start *default* traffic must not auto-approve.
+    if (createdAtMs < startedAt && !approvalSource?.durable && request.trigger === 'default') {
+      return unavailableDecision();
+    }
     if (request.trigger === 'default' && request.destination && session) {
       if (permitsConfiguredGatewayRead(request.destination)) return current() ? 'approve' : unavailableDecision();
       const config = await getContainerConfig(request.agentGroupId);
@@ -609,8 +616,22 @@ async function expireApproval(
 }
 
 async function denyAll(reason: 'host restarted' | 'bridge failed'): Promise<void> {
-  if (approvalSource?.durable) {
-    for (const [id, state] of pending) settle(id, state, 'unavailable');
+  // Host restart: leave gateway holds pending (settle unavailable) and keep
+  // Discord cards / pending_approvals rows so the next poll can re-arm them.
+  // Bridge failure: fail closed — expire cards and deny (non-durable) or
+  // settle unavailable (durable providers submit via decide()).
+  if (approvalSource?.durable || reason === 'host restarted') {
+    await Promise.all(
+      [...pending.entries()].map(async ([id, state]) => {
+        try {
+          const row = await getPendingApproval(id);
+          if (row) await editExpiredGatewayApprovalCard(row, reason);
+        } catch (err) {
+          log.error('Gateway approval restart card update failed', { approvalId: id, err });
+        }
+        settle(id, state, 'unavailable');
+      }),
+    );
     return;
   }
   await Promise.all([...pending.keys()].map((approvalId) => expireApproval(approvalId, reason)));
