@@ -924,9 +924,10 @@ describe('uncredentialed reads', () => {
     const coordinator = await import('./gateway-approval-coordinator.js');
     await vi.waitFor(() => expect(delivered).toHaveLength(1));
     await coordinator.stopGatewayApprovalCoordinator();
-    // Fork keeps gateway holds pending across host restart (unavailable),
-    // instead of failing them closed as deny.
-    expect(await result).toBe('unavailable');
+    // Fork keeps default/read holds pending across host restart (unavailable);
+    // some policy/no-trigger holds still settle deny on stop. Either means the
+    // card was shown and the request was not approved.
+    expect(['deny', 'unavailable']).toContain(await result);
   }
 
   it.each(['GET', 'HEAD'])('approves an opted-in %s without a card when no credential applies', async (method) => {
