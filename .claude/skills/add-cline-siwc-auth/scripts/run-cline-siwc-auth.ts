@@ -1,16 +1,18 @@
 #!/usr/bin/env pnpm exec tsx
 /**
- * Phase 2 CLI: SIWC browser login → gateway vault (Cline SIWC connection).
+ * Phase 2 CLI: SIWC browser login → gateway vault + local session (refresh).
  *
  *   pnpm exec tsx .claude/skills/add-cline-siwc-auth/scripts/run-cline-siwc-auth.ts
  *   pnpm exec tsx .claude/skills/add-cline-siwc-auth/scripts/run-cline-siwc-auth.ts --port 1455
  *
- * Stores a **generic** Bearer secret for api.openai.com (no ChatGPT-Account-Id).
+ * Stores a **generic** Bearer secret for api.openai.com (no ChatGPT-Account-Id)
+ * and data/siwc/session.json for host-side automatic refresh.
  * Default callback is http://127.0.0.1:1455/auth/callback.
  */
 import { execFileSync } from 'node:child_process';
 
 import { getCredentialStore } from '../../../../setup/gateways/credential-store.js';
+import { saveSiwcSession, sessionFromLogin } from '../../../../src/modules/siwc-refresh/index.js';
 import {
   CLINE_SIWC_CONNECTION_NAME,
   accessTokenFromSiwcTokens,
@@ -100,17 +102,29 @@ async function main(): Promise<void> {
     },
   });
   await vault.save(accessToken);
+
+  const session = sessionFromLogin({
+    clientId: login.clientId,
+    accessToken,
+    refreshToken: login.refreshToken,
+    idToken: login.idToken,
+    scope: login.scope,
+    expiresIn: login.expiresIn,
+  });
+  saveSiwcSession(session, root);
+
   await configureSiwcModelEndpoint(store);
 
   console.log('\nSaved Cline SIWC credentials to the selected gateway vault.');
   console.log('  kind:      generic Bearer (Authorization only — no ChatGPT-Account-Id)');
   console.log(`  client_id: ${login.clientId}`);
   console.log(`  host id:   ${login.hostId}`);
+  console.log(`  expires:   ${session.expiresAt}`);
+  console.log(`  session:   data/siwc/session.json (refresh_token; host auto-refreshes)`);
   console.log(`  replaced:  ${existing ? 'yes' : 'new entry'}`);
   console.log(`\nManage ChatGPT plan usage:\n  ${SIWC_USAGE_URL}\n`);
-  console.log(
-    'Note: OneCLI does not refresh this SIWC Bearer entry. Re-run this command when the access token expires.',
-  );
+  console.log('Host refresh loop updates the vault access token (~hourly). Re-run this');
+  console.log('command only when refresh fails (needsReauth) or after 30 days without refresh.');
 }
 
 main().catch((err) => {

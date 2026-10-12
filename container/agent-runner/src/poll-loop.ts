@@ -785,7 +785,10 @@ export async function processQuery(
           continue;
         noticed.push(target);
         try {
-          await deliverErrorResult(target, 'The agent run failed. Check the logs for details.');
+          await deliverErrorResult(
+            target,
+            errMsg.trim() || 'The agent run failed. Check the logs for details.',
+          );
         } catch (noticeError) {
           log(
             `Failed to deliver query error notice: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`,

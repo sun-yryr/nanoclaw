@@ -5,7 +5,9 @@ import {
   CLINE_SIWC_API_KEY_SENTINEL,
   CLINE_SIWC_BASE_URL,
   CLINE_SIWC_DEFAULT_MODEL,
+  formatClineAuthFailureNotice,
   installSiwcFetchRewrite,
+  isClineAuthFailureMessage,
   isOpenCodeOrLunaModelId,
   isSiwcResponsesRequestUrl,
   resetSiwcFetchRewriteForTests,
@@ -30,6 +32,20 @@ describe('resolveClineAuthMode', () => {
 
   it('throws on unknown values', () => {
     expect(() => resolveClineAuthMode('codex')).toThrow(/Invalid CLINE_AUTH_MODE/);
+  });
+});
+
+describe('formatClineAuthFailureNotice', () => {
+  it('adds a re-login hint for SIWC expired tokens', () => {
+    const msg = 'Provided authentication token is expired. Please try signing in again.';
+    expect(isClineAuthFailureMessage(msg)).toBe(true);
+    const notice = formatClineAuthFailureNotice(msg, 'siwc');
+    expect(notice).toContain(msg);
+    expect(notice).toContain('run-cline-siwc-auth.ts');
+  });
+
+  it('passes through non-auth errors unchanged', () => {
+    expect(formatClineAuthFailureNotice('rate limited', 'siwc')).toBe('rate limited');
   });
 });
 

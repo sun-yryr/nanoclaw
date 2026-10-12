@@ -65,14 +65,22 @@ ssh -L 1455:127.0.0.1:1455 user@nanoclaw-host
 1. ChatGPT にログインし、plan usage を許可する。
 2. host id は `data/siwc/host-id`。発行 client id は `data/siwc/registration.json`（トークンは書かない）。
 3. `chatgpt.tokens.use.direct` が無ければ失敗して終了する。
-4. 成功時は gateway の `Cline SIWC` に **access_token を generic Bearer** で保存する。古い `openai` 型の同名エントリは CLI が削除する。
-5. 期限切れ後は同じコマンドで再ログインする（OneCLI はこのエントリを自動 refresh しない）。
+4. 成功時は gateway の `Cline SIWC` に **access_token を generic Bearer** で保存し、`data/siwc/session.json` に refresh 用セッションを書く。古い `openai` 型の同名エントリは CLI が削除する。
+5. ホストの `siwc-refresh` モジュールが access（約1時間）を自動 refresh する。refresh 不能時だけ同じコマンドで再ログインする。
+
+手動 refresh（デバッグ）:
+
+```bash
+pnpm exec tsx .claude/skills/add-cline-siwc-auth/scripts/refresh-cline-siwc.ts
+pnpm exec tsx .claude/skills/add-cline-siwc-auth/scripts/refresh-cline-siwc.ts --force
+```
 
 テスト:
 
 ```bash
 pnpm exec vitest run .claude/skills/add-cline-siwc-auth/scripts/siwc-login.test.ts
 pnpm exec vitest run .claude/skills/add-cline-siwc-auth/scripts/cline-siwc-vault.test.ts
+pnpm exec vitest run src/modules/siwc-refresh/refresh.test.ts
 ```
 
 ## 2. `.env` とホスト再起動
@@ -123,4 +131,5 @@ cd container/agent-runner && bun test src/providers/cline-siwc.test.ts src/provi
 - **usage limit**: ChatGPT Settings の Usage。`subscription_sharing_usage_limit_exceeded` など。
 - **unsupported parameter**: preview limitations。fetch rewrite が効いているかコンテナログの `SIWC fetch rewrite installed` を見る。
 - **spawn=off**: SIWC 親で `CLINE_SPAWN_BASE_URL` が無いと子は無効。
-- **トークン期限切れ**: `run-cline-siwc-auth.ts` を再実行する。
+- **トークン期限切れ（Discord に expired が出る）**: ホストログで SIWC refresh を確認。`needsReauth` / refresh 失敗なら `run-cline-siwc-auth.ts` を再実行。初回だけ session.json が無い場合も再ログイン（古い vault のみの状態）。
+- **ホストが refresh していない**: `CLINE_AUTH_MODE=siwc` または `data/siwc/session.json` があること。ホスト再起動後に `SIWC refresh loop started` が出ること。

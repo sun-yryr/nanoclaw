@@ -231,3 +231,28 @@ export function resetSiwcFetchRewriteForTests(): void {
   installedOriginal = null;
   installDepth = 0;
 }
+
+const AUTH_EXPIRED =
+  /authentication token is expired|token is expired|please try signing in again|invalid_api_key|unauthorized/i;
+
+/**
+ * Channel-facing text when a SIWC / ChatGPT plan call fails auth.
+ * Host refresh is log-only; the agent turn is what Discord should surface.
+ */
+export function formatClineAuthFailureNotice(message: string, authMode: ClineAuthMode): string {
+  const trimmed = message.trim() || 'Authentication failed';
+  if (authMode !== 'siwc' || !AUTH_EXPIRED.test(trimmed)) {
+    return trimmed;
+  }
+  return (
+    `${trimmed}\n\n` +
+    'ChatGPT (SIWC) の access token が使えません。ホストで自動 refresh が動いていても、' +
+    'refresh 自体が切れている場合は再ログインが必要です:\n' +
+    '`pnpm exec tsx .claude/skills/add-cline-siwc-auth/scripts/run-cline-siwc-auth.ts`'
+  );
+}
+
+/** True when the provider error looks like a dead credential (not a transient blip). */
+export function isClineAuthFailureMessage(message: string): boolean {
+  return AUTH_EXPIRED.test(message);
+}

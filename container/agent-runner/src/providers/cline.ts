@@ -22,7 +22,9 @@ import {
   resolveClineSpawnConfig,
 } from './cline-spawn.js';
 import {
+  formatClineAuthFailureNotice,
   installSiwcFetchRewrite,
+  isClineAuthFailureMessage,
   resolveClineAuthMode,
   resolveClineRuntime,
 } from './cline-siwc.js';
@@ -111,6 +113,20 @@ function describeError(err: unknown, fallback: string): { message: string; class
     message: redactString(message || fallback),
     classification: parts.length > 0 ? parts.join('/') : 'unclassified',
     detail,
+  };
+}
+
+/** Terminal turn failure → result door (Discord notice). Auth failures get a re-login hint. */
+function terminalFailureResult(
+  described: { message: string; classification: string },
+  authMode: ReturnType<typeof resolveClineAuthMode>,
+): ProviderEvent {
+  const notice = formatClineAuthFailureNotice(described.message, authMode);
+  return {
+    type: 'result',
+    text: null,
+    isError: true,
+    error: notice,
   };
 }
 
@@ -577,12 +593,9 @@ export class ClineProvider implements AgentProvider {
               const error = (event as any).error;
               const described = describeError(error, 'Run failed');
               log(`run-failed error detail: ${described.detail}`);
-              providerEvent = {
-                type: 'error',
-                message: described.message,
-                retryable: true,
-                classification: described.classification,
-              };
+              // Terminal: use the result door so Discord gets the message
+              // (poll-loop only notices result.isError, not type:error).
+              providerEvent = terminalFailureResult(described, authMode);
               break;
             }
             case 'status-notice': {
@@ -630,12 +643,7 @@ export class ClineProvider implements AgentProvider {
           .catch((err: unknown) => {
             const described = describeError(err, 'Run failed');
             log(`agent.run rejected: ${described.detail}`);
-            events.push({
-              type: 'error',
-              message: described.message,
-              retryable: true,
-              classification: described.classification,
-            });
+            events.push(terminalFailureResult(described, authMode));
             runDone = true;
             eventWaiting?.();
           });
@@ -659,12 +667,11 @@ export class ClineProvider implements AgentProvider {
           if (runResult.status !== 'completed') {
             const described = describeError(runResult.error, 'Run failed');
             log(`agent.run non-completed status=${runResult.status}: ${described.detail}`);
-            yield {
-              type: 'error',
-              message: described.message,
-              retryable: true,
-              classification: described.classification,
-            };
+            yield terminalFailureResult(described, authMode);
+            if (isClineAuthFailureMessage(described.message)) {
+              // Do not sit in follow-up wait on a dead credential.
+              return;
+            }
           }
         }
 
@@ -713,12 +720,7 @@ export class ClineProvider implements AgentProvider {
               .catch((err: unknown) => {
                 const described = describeError(err, 'Continue failed');
                 log(`agent.continue rejected: ${described.detail}`);
-                events.push({
-                  type: 'error',
-                  message: described.message,
-                  retryable: true,
-                  classification: described.classification,
-                });
+                events.push(terminalFailureResult(described, authMode));
                 continueDone = true;
                 eventWaiting?.();
               });
@@ -742,12 +744,8 @@ export class ClineProvider implements AgentProvider {
               if (continueResult.status !== 'completed') {
                 const described = describeError(continueResult.error, 'Continue failed');
                 log(`agent.continue non-completed status=${continueResult.status}: ${described.detail}`);
-                yield {
-                  type: 'error',
-                  message: described.message,
-                  retryable: true,
-                  classification: described.classification,
-                };
+                yield terminalFailureResult(described, authMode);
+                if (isClineAuthFailureMessage(described.message)) return;
               }
             }
 
@@ -759,12 +757,7 @@ export class ClineProvider implements AgentProvider {
       } catch (err) {
         const described = describeError(err, 'Provider error');
         log(`gen() caught error detail: ${described.detail}`);
-        yield {
-          type: 'error',
-          message: described.message,
-          retryable: true,
-          classification: described.classification,
-        };
+        yield terminalFailureResult(described, authMode);
       } finally {
         uninstallFetchRewrite?.();
         if (mcpRegistry) {
