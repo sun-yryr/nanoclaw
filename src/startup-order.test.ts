@@ -8,7 +8,11 @@ const state = vi.hoisted(() => ({
   startChannels: vi.fn(),
   ready: vi.fn(),
 }));
-vi.mock('./host-lock.js', () => ({ acquireHostLock: vi.fn(), releaseHostLock: vi.fn(), HostLockError: class HostLockError extends Error {} }));
+vi.mock('./host-lock.js', () => ({
+  acquireHostLock: vi.fn(),
+  releaseHostLock: vi.fn(),
+  HostLockError: class HostLockError extends Error {},
+}));
 vi.mock('./backfill-container-configs.js', () => ({ backfillContainerConfigs: vi.fn() }));
 vi.mock('./config.js', () => ({ CENTRAL_DB_PATH: ':memory:' }));
 vi.mock('./circuit-breaker.js', () => ({ enforceStartupBackoff: vi.fn(), resetCircuitBreaker: vi.fn() }));
