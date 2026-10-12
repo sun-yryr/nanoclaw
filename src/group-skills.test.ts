@@ -178,7 +178,7 @@ describe('materializeTemplateSkills', () => {
       materializeTemplateSkills('g10', path.join(groupB, '.agents', 'skills'));
 
       expect(tree(groupB)).toEqual(tree(groupA));
-      expect(tree(groupB)).toContain('file .agents/skills/widget/SKILL.md:body:644');
+      expect(tree(groupB)).toContain(`file .agents/skills/widget/SKILL.md:body:${(0o666 & ~process.umask()).toString(8)}`);
       expect(fs.lstatSync(path.join(groupB, '.agents', 'skills', 'widget')).isSymbolicLink()).toBe(false);
       expect(warn).not.toHaveBeenCalled();
     });
