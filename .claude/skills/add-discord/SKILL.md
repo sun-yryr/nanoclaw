@@ -25,6 +25,13 @@ src/channels/discord.ts
 src/channels/discord-registration.test.ts
 ```
 
+Fork: after the channels-branch copy, keep raw Discord outbound text so Chat SDK
+does not re-autolink bare URLs as `[url](url)`.
+
+```nc:run effect:refresh
+node -e "const fs=require('fs'); const p='src/channels/discord.ts'; let t=fs.readFileSync(p,'utf8'); if(!t.includes(\"unwrapIdenticalDiscordLinks\")){t=t.replace(\"import { registerChannelAdapter } from './channel-registry.js';\\n\",\"import { registerChannelAdapter } from './channel-registry.js';\\nimport { unwrapIdenticalDiscordLinks } from './discord-links.js';\\n\");} if(!t.includes('postAsRaw: true')){const a='      maxTextLength: 2000,\\n    });'; const b='      maxTextLength: 2000,\\n      // Avoid Chat SDK markdown re-autolinking bare URLs as [url](url).\\n      postAsRaw: true,\\n      transformOutboundText: unwrapIdenticalDiscordLinks,\\n    });'; if(!t.includes(a)) throw new Error('discord.ts anchor missing'); t=t.replace(a,b);} fs.writeFileSync(p,t);"
+```
+
 ### 2. Register the adapter
 
 Append the self-registration import to the channel barrel (skipped if the line
