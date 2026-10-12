@@ -6,7 +6,9 @@ description: >-
 metadata:
   nanoclaw-provider: cline
   nanoclaw-provider-label: Cline
+  nanoclaw-provider-hint: Fork-local OpenAI-compatible Cline runtime
   nanoclaw-provider-offered: 'false'
+  nanoclaw-provider-image: local-required
 ---
 
 # Cline agent provider (fork-local)

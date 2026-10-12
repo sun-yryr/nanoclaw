@@ -19,6 +19,12 @@ const gateway: GatewayProviderDefinition = {
 };
 
 beforeEach(async () => {
+  // Upstream tests create multiple agent groups and expect group-chat thread
+  // routing. This fork defaults to single-agent + shared sessions in production;
+  // restore the upstream semantics only for the host test run.
+  process.env.ALLOW_MULTIPLE_AGENT_GROUPS = 'true';
+  process.env.FORCE_PER_THREAD_IN_GROUP_CHATS = 'true';
+
   await import('./mailbox/compose.js');
   (await import('./gateway-providers/index.js')).resetGatewayProvider(gateway);
 });
