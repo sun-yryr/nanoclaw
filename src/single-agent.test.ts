@@ -43,17 +43,11 @@ describe('single-agent policy', () => {
   });
 
   it('honours wiring session_mode unless FORCE_PER_THREAD_IN_GROUP_CHATS is set', () => {
-    expect(
-      effectiveSessionMode('shared', { adapterSupportsThreads: true, isGroup: true }),
-    ).toBe('shared');
+    expect(effectiveSessionMode('shared', { adapterSupportsThreads: true, isGroup: true })).toBe('shared');
     process.env.FORCE_PER_THREAD_IN_GROUP_CHATS = 'true';
     expect(forcePerThreadInGroupChats()).toBe(true);
-    expect(
-      effectiveSessionMode('shared', { adapterSupportsThreads: true, isGroup: true }),
-    ).toBe('per-thread');
-    expect(
-      effectiveSessionMode('agent-shared', { adapterSupportsThreads: true, isGroup: true }),
-    ).toBe('agent-shared');
+    expect(effectiveSessionMode('shared', { adapterSupportsThreads: true, isGroup: true })).toBe('per-thread');
+    expect(effectiveSessionMode('agent-shared', { adapterSupportsThreads: true, isGroup: true })).toBe('agent-shared');
   });
 
   it('formats a useful create error', async () => {
