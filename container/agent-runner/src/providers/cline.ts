@@ -21,6 +21,11 @@ import {
   clineSpawnSystemPromptHint,
   resolveClineSpawnConfig,
 } from './cline-spawn.js';
+import {
+  installSiwcFetchRewrite,
+  resolveClineAuthMode,
+  resolveClineRuntime,
+} from './cline-siwc.js';
 import { formatToolStatusLine } from '../turn-status.js';
 import { resolveComposedClaudeMd } from '../claude-md-resolve.js';
 import { registerProvider } from './provider-registry.js';
@@ -320,6 +325,7 @@ export class ClineProvider implements AgentProvider {
   query(input: QueryInput): AgentQuery {
     log('query() called');
     log(`ENV: OPENCODE_GO_API_KEY=${process.env.OPENCODE_GO_API_KEY ? '***' : 'undefined'}`);
+    log(`ENV: CLINE_AUTH_MODE=${process.env.CLINE_AUTH_MODE ?? '(unset→default)'}`);
     log(`ENV: CLINE_BASE_URL=${process.env.CLINE_BASE_URL}`);
     log(`ENV: CLINE_MODEL=${process.env.CLINE_MODEL}`);
     log(`ENV: OPENCODE_MODEL=${process.env.OPENCODE_MODEL}`);
@@ -330,33 +336,12 @@ export class ClineProvider implements AgentProvider {
     log(
       `ENV: CLINE_SPAWN_BASE_URL=${process.env.CLINE_SPAWN_BASE_URL ?? '(unset→parent CLINE_BASE_URL)'}`,
     );
+    log(`ENV: CLINE_SPAWN_AUTH_MODE=${process.env.CLINE_SPAWN_AUTH_MODE ?? '(unset→default)'}`);
 
-    const baseUrl = process.env.CLINE_BASE_URL || 'https://opencode.ai/zen/go/v1';
-    const modelId = process.env.CLINE_MODEL || process.env.OPENCODE_MODEL || 'opencode-go/kimi-k2.6';
-    // OneCLI generic-secret proxy overwrites the Authorization header on the
-    // wire, so the container only needs a placeholder value to make the SDK
-    // emit the header in the first place.
-    const apiKey = process.env.OPENCODE_GO_API_KEY || 'placeholder';
-    const providerId = resolveClineProviderId(process.env.CLINE_API);
+    const authMode = resolveClineAuthMode(process.env.CLINE_AUTH_MODE);
     const reasoningEffort = resolveClineReasoningEffort(
       process.env.CLINE_REASONING_EFFORT,
       this.effort,
-    );
-    const spawnConfig = resolveClineSpawnConfig({
-      spawnModel: process.env.CLINE_SPAWN_MODEL,
-      spawnApi: process.env.CLINE_SPAWN_API,
-      spawnBaseUrl: process.env.CLINE_SPAWN_BASE_URL,
-      parentBaseUrl: baseUrl,
-      apiKey,
-      maxIterations: Number(process.env.CLINE_SPAWN_MAX_ITERATIONS) || undefined,
-    });
-
-    log(
-      `Creating Agent with providerId=${providerId}, baseUrl=${baseUrl}, modelId=${modelId}` +
-        (reasoningEffort ? `, reasoningEffort=${reasoningEffort}` : '') +
-        (spawnConfig
-          ? `, spawn=${spawnConfig.modelId}/${spawnConfig.providerId} @ ${spawnConfig.baseUrl}`
-          : ', spawn=off'),
     );
 
     const pending: Array<{ text: string; userContent?: UserContentPart[] }> = [];
@@ -376,65 +361,8 @@ export class ClineProvider implements AgentProvider {
     async function* gen(): AsyncGenerator<ProviderEvent> {
       log('gen() started');
       let mcpRegistry: McpToolRegistry | null = null;
+      let uninstallFetchRewrite: (() => void) | null = null;
       try {
-        // Build MCP once. With spawn: parent never sees these — only the child does.
-        let mcpTools: ReturnType<typeof createTool>[] = [];
-        if (Object.keys(self.mcpServers).length > 0) {
-          mcpRegistry = new McpToolRegistry();
-          await mcpRegistry.init(self.mcpServers);
-          mcpTools = await mcpRegistry.buildTools();
-          log(`Loaded ${mcpTools.length} MCP tools`);
-        }
-
-        let tools: ReturnType<typeof createTool>[];
-        let deferral: McpToolDeferral;
-
-        if (spawnConfig) {
-          // Parent = orchestrator only: ask/submit + spawn_agent.
-          // Child = builtins + memory + all MCP (with its own deferral per spawn).
-          const hostTools = buildClineParentToolsWithSpawn(input.cwd);
-          const spawnTool = buildClineSpawnAgentTool({
-            spawn: spawnConfig,
-            cwd: input.cwd,
-            extraChildTools: [memoryReadTool, memoryWriteTool, ...mcpTools],
-            log,
-          });
-          tools = [...hostTools, spawnTool];
-          // No MCP on parent → deferral is a no-op pass-through of always-load tools.
-          deferral = new McpToolDeferral(tools);
-          tools = deferral.allRegisteredTools();
-          log(
-            `spawn-parent tools: ${tools.map((t) => t.name).join(', ')} ` +
-              `(child model=${spawnConfig.modelId} @ ${spawnConfig.baseUrl}; MCP×${mcpTools.length} on child only)`,
-          );
-        } else {
-          const builtinTools = buildClineBuiltinTools(input.cwd);
-          tools = [...builtinTools, memoryReadTool, memoryWriteTool, ...mcpTools];
-          // External MCP schemas stay out of the model prompt until tool_search
-          // activates them; execute handlers remain registered on the Agent.
-          deferral = new McpToolDeferral(tools);
-          tools = deferral.allRegisteredTools();
-          log(
-            `Loaded ${builtinTools.length} Cline built-in tools: ${builtinTools.map((t) => t.name).join(', ')}`,
-          );
-          log(
-            `MCP deferral: ${deferral.alwaysLoad.length} always-load, ` +
-              `${deferral.deferred.length} deferred, tool_search enabled`,
-          );
-        }
-
-        const claudeMd = resolveComposedClaudeMd(input.cwd);
-        const systemPrompt = [
-          input.systemContext?.instructions,
-          claudeMd,
-          spawnConfig ? clineSpawnSystemPromptHint(spawnConfig.modelId) : '',
-        ]
-          .filter(Boolean)
-          .join('\n\n');
-        if (claudeMd) {
-          log(`Resolved CLAUDE.md instructions (${claudeMd.length} chars)`);
-        }
-
         // Claude-shaped resume: continuation is an opaque session id; the
         // conversation body lives on disk under ~/.claude/cline-sessions/.
         // Resolve the id BEFORE constructing Agent so OpenCode Go can get a
@@ -461,6 +389,117 @@ export class ClineProvider implements AgentProvider {
           log(`Ignoring non-opaque continuation; starting fresh session ${sessionId}`);
         }
 
+        const runtime = resolveClineRuntime({
+          authModeEnv: process.env.CLINE_AUTH_MODE,
+          apiEnv: process.env.CLINE_API,
+          baseUrlEnv: process.env.CLINE_BASE_URL,
+          modelEnv: process.env.CLINE_MODEL,
+          openCodeModelEnv: process.env.OPENCODE_MODEL,
+          apiKeyEnv: process.env.OPENCODE_GO_API_KEY,
+          resolveProviderId: resolveClineProviderId,
+          sessionId,
+        });
+        const { providerId, baseUrl, apiKey, modelId, headers, useMcpDeferral } = runtime;
+
+        if (runtime.installFetchRewrite) {
+          uninstallFetchRewrite = installSiwcFetchRewrite();
+          log('SIWC fetch rewrite installed (store:false, strip truncation)');
+        }
+
+        const spawnAuthMode = resolveClineAuthMode(process.env.CLINE_SPAWN_AUTH_MODE);
+        const spawnConfig = resolveClineSpawnConfig({
+          spawnModel: process.env.CLINE_SPAWN_MODEL,
+          spawnApi: process.env.CLINE_SPAWN_API,
+          spawnBaseUrl: process.env.CLINE_SPAWN_BASE_URL,
+          parentBaseUrl: baseUrl,
+          apiKey,
+          maxIterations: Number(process.env.CLINE_SPAWN_MAX_ITERATIONS) || undefined,
+          parentAuthMode: authMode,
+          spawnAuthMode,
+        });
+
+        log(
+          `Creating Agent with authMode=${runtime.authMode}, providerId=${providerId}, baseUrl=${baseUrl}, modelId=${modelId}` +
+            (reasoningEffort ? `, reasoningEffort=${reasoningEffort}` : '') +
+            (spawnConfig
+              ? `, spawn=${spawnConfig.modelId}/${spawnConfig.providerId} @ ${spawnConfig.baseUrl}`
+              : ', spawn=off'),
+        );
+
+        // Build MCP once. With spawn: parent never sees these — only the child does.
+        let mcpTools: ReturnType<typeof createTool>[] = [];
+        if (Object.keys(self.mcpServers).length > 0) {
+          mcpRegistry = new McpToolRegistry();
+          await mcpRegistry.init(self.mcpServers);
+          mcpTools = await mcpRegistry.buildTools();
+          log(`Loaded ${mcpTools.length} MCP tools`);
+        }
+
+        let tools: ReturnType<typeof createTool>[];
+        let deferral: McpToolDeferral | null = null;
+
+        if (spawnConfig) {
+          // Parent = orchestrator only: ask/submit + spawn_agent.
+          // Child = builtins + memory + all MCP (with its own deferral per spawn).
+          const hostTools = buildClineParentToolsWithSpawn(input.cwd);
+          const spawnTool = buildClineSpawnAgentTool({
+            spawn: spawnConfig,
+            cwd: input.cwd,
+            extraChildTools: [memoryReadTool, memoryWriteTool, ...mcpTools],
+            useMcpDeferral: spawnAuthMode !== 'siwc',
+            log,
+          });
+          tools = [...hostTools, spawnTool];
+          if (useMcpDeferral) {
+            // No MCP on parent → deferral is a no-op pass-through of always-load tools.
+            deferral = new McpToolDeferral(tools);
+            tools = deferral.allRegisteredTools();
+          }
+          log(
+            `spawn-parent tools: ${tools.map((t) => t.name).join(', ')} ` +
+              `(child model=${spawnConfig.modelId} @ ${spawnConfig.baseUrl}; MCP×${mcpTools.length} on child only)`,
+          );
+        } else {
+          const builtinTools = buildClineBuiltinTools(input.cwd);
+          tools = [...builtinTools, memoryReadTool, memoryWriteTool, ...mcpTools];
+          if (useMcpDeferral) {
+            // External MCP schemas stay out of the model prompt until tool_search
+            // activates them; execute handlers remain registered on the Agent.
+            deferral = new McpToolDeferral(tools);
+            tools = deferral.allRegisteredTools();
+            log(
+              `Loaded ${builtinTools.length} Cline built-in tools: ${builtinTools.map((t) => t.name).join(', ')}`,
+            );
+            log(
+              `MCP deferral: ${deferral.alwaysLoad.length} always-load, ` +
+                `${deferral.deferred.length} deferred, tool_search enabled`,
+            );
+          } else {
+            // SIWC preview forbids Responses tool_search — load every tool up front.
+            log(
+              `Loaded ${builtinTools.length} Cline built-in tools (SIWC: no MCP deferral / tool_search): ` +
+                `${builtinTools.map((t) => t.name).join(', ')}`,
+            );
+          }
+        }
+
+        const claudeMd = resolveComposedClaudeMd(input.cwd);
+        const systemPrompt = [
+          input.systemContext?.instructions,
+          claudeMd,
+          spawnConfig ? clineSpawnSystemPromptHint(spawnConfig.modelId) : '',
+        ]
+          .filter(Boolean)
+          .join('\n\n');
+        if (claudeMd) {
+          log(`Resolved CLAUDE.md instructions (${claudeMd.length} chars)`);
+        }
+
+        const modelIoHooks = createModelIoHooks({ providerId, modelId, sessionId });
+        const hooks = deferral
+          ? composeDeferralAndModelIoHooks(deferral, modelIoHooks)
+          : modelIoHooks;
+
         const agent = new Agent({
           providerId,
           modelId,
@@ -469,16 +508,11 @@ export class ClineProvider implements AgentProvider {
           systemPrompt: systemPrompt || undefined,
           tools,
           maxIterations: 50,
-          headers: {
-            'x-opencode-session': sessionId,
-          },
+          ...(Object.keys(headers).length > 0 ? { headers } : {}),
           // Persist SDK-layer model I/O under /workspace/debug/model-io/
           // (host: data/v2-sessions/<group>/<session>/debug/model-io/).
           // Deferral beforeModel runs first so dumps show the filtered set.
-          hooks: composeDeferralAndModelIoHooks(
-            deferral,
-            createModelIoHooks({ providerId, modelId, sessionId }),
-          ),
+          hooks,
           // Pass through verbatim; invalid values fail at the SDK / upstream.
           ...(reasoningEffort ? { reasoningEffort: reasoningEffort as 'low' | 'medium' | 'high' | 'xhigh' } : {}),
         });
@@ -732,6 +766,7 @@ export class ClineProvider implements AgentProvider {
           classification: described.classification,
         };
       } finally {
+        uninstallFetchRewrite?.();
         if (mcpRegistry) {
           await mcpRegistry.close();
           log('MCP registry closed');

@@ -51,6 +51,13 @@ export interface ResolveClineSpawnConfigInput {
   baseUrl?: string | null;
   apiKey?: string | null;
   maxIterations?: number | null;
+  /**
+   * Parent CLINE_AUTH_MODE. When `siwc`, children do not inherit plan usage
+   * unless spawnAuthMode is also `siwc` (or an explicit non-SIWC spawnBaseUrl).
+   */
+  parentAuthMode?: 'default' | 'siwc' | null;
+  /** CLINE_SPAWN_AUTH_MODE — opt children into SIWC explicitly. */
+  spawnAuthMode?: 'default' | 'siwc' | null;
 }
 
 function resolveSpawnProviderId(apiEnv?: string | null): 'openai-compatible' | 'openai-native' {
@@ -68,16 +75,43 @@ function resolveSpawnProviderId(apiEnv?: string | null): 'openai-compatible' | '
  * independent of the parent's CLINE_API — parent on responses + child on chat
  * is the common strong/fast split.
  * CLINE_SPAWN_BASE_URL selects a different endpoint; omit to share the parent's URL.
+ *
+ * SIWC parent: children stay off plan usage by default. Enable with
+ * CLINE_SPAWN_AUTH_MODE=siwc, or set CLINE_SPAWN_BASE_URL to a non-api.openai.com
+ * endpoint (API-key / OpenCode path). Inheriting the parent's SIWC base URL
+ * alone is refused.
  */
 export function resolveClineSpawnConfig(input: ResolveClineSpawnConfigInput): ClineSpawnConfig | null {
   const modelId = input.spawnModel?.trim();
   if (!modelId) return null;
 
+  const parentAuthMode = input.parentAuthMode ?? 'default';
+  const spawnAuthMode = input.spawnAuthMode ?? 'default';
+  const spawnBaseUrl = input.spawnBaseUrl?.trim() || '';
+  const parentBaseUrl = input.parentBaseUrl?.trim() || input.baseUrl?.trim() || '';
+
+  if (spawnAuthMode === 'siwc') {
+    const maxIterations =
+      typeof input.maxIterations === 'number' && input.maxIterations > 0
+        ? Math.floor(input.maxIterations)
+        : 25;
+    return {
+      modelId,
+      providerId: 'openai-native',
+      baseUrl: spawnBaseUrl || 'https://api.openai.com/v1',
+      apiKey: 'siwc-sentinel',
+      maxIterations,
+    };
+  }
+
+  if (parentAuthMode === 'siwc') {
+    // Parent is on ChatGPT plan usage — do not silently put children there.
+    if (!spawnBaseUrl) return null;
+    if (isApiOpenAiBaseUrl(spawnBaseUrl)) return null;
+  }
+
   const baseUrl =
-    input.spawnBaseUrl?.trim() ||
-    input.parentBaseUrl?.trim() ||
-    input.baseUrl?.trim() ||
-    'https://opencode.ai/zen/go/v1';
+    spawnBaseUrl || parentBaseUrl || 'https://opencode.ai/zen/go/v1';
   const apiKey = input.apiKey?.trim() || 'placeholder';
   const maxIterations =
     typeof input.maxIterations === 'number' && input.maxIterations > 0
@@ -91,6 +125,14 @@ export function resolveClineSpawnConfig(input: ResolveClineSpawnConfigInput): Cl
     apiKey,
     maxIterations,
   };
+}
+
+function isApiOpenAiBaseUrl(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase() === 'api.openai.com';
+  } catch {
+    return false;
+  }
 }
 
 export function buildSpawnChildTools(
@@ -114,6 +156,11 @@ export interface BuildClineSpawnAgentToolOptions {
    * Child also gets full builtins (minus ask_question / spawn_agent).
    */
   extraChildTools?: AgentTool[];
+  /**
+   * When false (SIWC child), skip MCP deferral / tool_search — SIWC Responses
+   * rejects a tool named tool_search. Default true.
+   */
+  useMcpDeferral?: boolean;
   log?: (msg: string) => void;
 }
 
@@ -122,7 +169,7 @@ export interface BuildClineSpawnAgentToolOptions {
  * Each spawn gets a fresh MCP deferral so external MCP schemas stay progressive.
  */
 export function buildClineSpawnAgentTool(options: BuildClineSpawnAgentToolOptions): AgentTool {
-  const { spawn, cwd, extraChildTools = [], log = () => {} } = options;
+  const { spawn, cwd, extraChildTools = [], useMcpDeferral = true, log = () => {} } = options;
 
   const configProvider = createDelegatedAgentConfigProvider({
     providerId: spawn.providerId,
@@ -157,6 +204,11 @@ export function buildClineSpawnAgentTool(options: BuildClineSpawnAgentToolOption
     defaultMaxIterations: spawn.maxIterations,
     createSubAgentTools: () => {
       const base = buildSpawnChildTools(cwd, extraChildTools);
+      if (!useMcpDeferral) {
+        log(`spawn child tools: ${base.length} (no MCP deferral)`);
+        childDeferral = null;
+        return base;
+      }
       childDeferral = new McpToolDeferral(base);
       log(
         `spawn child tools: ${childDeferral.alwaysLoad.length} always-load, ` +

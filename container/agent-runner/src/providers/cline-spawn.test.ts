@@ -62,6 +62,51 @@ describe('resolveClineSpawnConfig', () => {
       resolveClineSpawnConfig({ spawnModel: 'x', spawnApi: 'auto' }),
     ).toThrow(/Invalid CLINE_SPAWN_API/);
   });
+
+  it('does not inherit SIWC parent base URL without explicit spawn auth or other endpoint', () => {
+    expect(
+      resolveClineSpawnConfig({
+        spawnModel: 'deepseek-v4.1-flash',
+        parentBaseUrl: 'https://api.openai.com/v1',
+        parentAuthMode: 'siwc',
+      }),
+    ).toBeNull();
+    expect(
+      resolveClineSpawnConfig({
+        spawnModel: 'deepseek-v4.1-flash',
+        spawnBaseUrl: 'https://api.openai.com/v1',
+        parentAuthMode: 'siwc',
+      }),
+    ).toBeNull();
+  });
+
+  it('allows a non-SIWC child endpoint when parent is SIWC', () => {
+    const cfg = resolveClineSpawnConfig({
+      spawnModel: 'deepseek-v4.1-flash',
+      spawnBaseUrl: 'https://opencode.ai/zen/go/v1',
+      parentAuthMode: 'siwc',
+      apiKey: 'placeholder',
+    });
+    expect(cfg).toMatchObject({
+      modelId: 'deepseek-v4.1-flash',
+      providerId: 'openai-compatible',
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+    });
+  });
+
+  it('opts children into SIWC only via spawnAuthMode=siwc', () => {
+    const cfg = resolveClineSpawnConfig({
+      spawnModel: 'gpt-5.4',
+      parentAuthMode: 'siwc',
+      spawnAuthMode: 'siwc',
+    });
+    expect(cfg).toMatchObject({
+      modelId: 'gpt-5.4',
+      providerId: 'openai-native',
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: 'siwc-sentinel',
+    });
+  });
 });
 
 describe('buildSpawnChildTools', () => {
