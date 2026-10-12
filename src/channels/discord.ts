@@ -8,7 +8,6 @@ import { readEnvFile } from '../env.js';
 import type { ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge, type ReplyContext } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
-import { unwrapIdenticalDiscordLinks } from './discord-links.js';
 
 /**
  * Dedicated bot app on a threaded platform. group threads:true matches the
@@ -93,9 +92,6 @@ registerChannelAdapter('discord', {
       // Discord rejects messages over 2000 chars; without this the bridge
       // would let long agent replies fail instead of splitting them.
       maxTextLength: 2000,
-      // Avoid Chat SDK markdown re-autolinking bare URLs as [url](url).
-      postAsRaw: true,
-      transformOutboundText: unwrapIdenticalDiscordLinks,
     });
   },
   defaults: DISCORD_DEFAULTS,
