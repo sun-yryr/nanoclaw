@@ -33,6 +33,9 @@ registerProviderContainerConfig('cline', () => {
     'CLINE_SPAWN_BASE_URL',
     'CLINE_SPAWN_AUTH_MODE',
     'CLINE_SPAWN_MAX_ITERATIONS',
+    'CLINE_DELEGATION_MAX_CONCURRENCY',
+    'CLINE_DELEGATION_MAX_TASKS_PER_BATCH',
+    'CLINE_DELEGATION_MAX_TASKS_PER_TURN',
     'OPENCODE_MODEL',
     'MOONSHOT_API_BASE_URL',
     'MOONSHOT_API_KEY',
@@ -86,6 +89,13 @@ registerProviderContainerConfig('cline', () => {
   }
   if (dotenv.CLINE_SPAWN_MAX_ITERATIONS) {
     env.CLINE_SPAWN_MAX_ITERATIONS = dotenv.CLINE_SPAWN_MAX_ITERATIONS;
+  }
+  for (const key of [
+    'CLINE_DELEGATION_MAX_CONCURRENCY',
+    'CLINE_DELEGATION_MAX_TASKS_PER_BATCH',
+    'CLINE_DELEGATION_MAX_TASKS_PER_TURN',
+  ]) {
+    if (dotenv[key] !== undefined) env[key] = dotenv[key];
   }
   if (!siwc && dotenv.OPENCODE_MODEL) {
     env.OPENCODE_MODEL = dotenv.OPENCODE_MODEL;

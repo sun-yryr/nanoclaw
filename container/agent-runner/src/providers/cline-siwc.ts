@@ -38,9 +38,7 @@ export function resolveClineAuthMode(env?: string | null): ClineAuthMode {
   const raw = (env ?? '').trim().toLowerCase();
   if (!raw || raw === 'default' || raw === 'api-key' || raw === 'generic') return 'default';
   if (raw === 'siwc') return 'siwc';
-  throw new Error(
-    `Invalid CLINE_AUTH_MODE=${JSON.stringify(env)} (expected "siwc", "default", or unset)`,
-  );
+  throw new Error(`Invalid CLINE_AUTH_MODE=${JSON.stringify(env)} (expected "siwc", "default", or unset)`);
 }
 
 export function isOpenCodeOrLunaModelId(modelId: string): boolean {
@@ -151,9 +149,9 @@ export function isSiwcCompatibleBaseUrl(baseUrl: string): boolean {
 export function isSiwcResponsesRequestUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
-    return /\/v1\/responses\/?$/.test(parsed.pathname) || /\/responses\/?$/.test(parsed.pathname);
+    return parsed.hostname.toLowerCase() === 'api.openai.com' && /\/responses\/?$/.test(parsed.pathname);
   } catch {
-    return /\/responses(?:\?|$)/.test(url);
+    return false;
   }
 }
 

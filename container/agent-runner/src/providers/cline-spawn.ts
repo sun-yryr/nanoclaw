@@ -23,7 +23,7 @@ import { McpToolDeferral } from './cline-mcp-deferral.js';
 type BeforeModelContext = Parameters<NonNullable<AgentHooks['beforeModel']>>[0];
 type BeforeToolContext = Parameters<NonNullable<AgentHooks['beforeTool']>>[0];
 
-const CHILD_EXCLUDED_TOOLS = new Set(['ask_question', 'spawn_agent']);
+const CHILD_EXCLUDED_TOOLS = new Set(['ask_question', 'spawn_agent', 'delegate_tasks']);
 
 /** Per-execute OpenCode Go session header — avoids races on parallel spawn_agent. */
 const childSessionStore = new AsyncLocalStorage<string>();
@@ -64,9 +64,7 @@ function resolveSpawnProviderId(apiEnv?: string | null): 'openai-compatible' | '
   const raw = (apiEnv ?? '').trim().toLowerCase();
   if (!raw || raw === 'chat') return 'openai-compatible';
   if (raw === 'responses') return 'openai-native';
-  throw new Error(
-    `Invalid CLINE_SPAWN_API=${JSON.stringify(apiEnv)} (expected "chat", "responses", or unset)`,
-  );
+  throw new Error(`Invalid CLINE_SPAWN_API=${JSON.stringify(apiEnv)} (expected "chat", "responses", or unset)`);
 }
 
 /**
@@ -135,10 +133,7 @@ function isApiOpenAiBaseUrl(baseUrl: string): boolean {
   }
 }
 
-export function buildSpawnChildTools(
-  cwd: string,
-  extras: AgentTool[] = [],
-): AgentTool[] {
+export function buildSpawnChildTools(cwd: string, extras: AgentTool[] = []): AgentTool[] {
   const builtins = buildClineBuiltinTools(cwd).filter((t) => !CHILD_EXCLUDED_TOOLS.has(t.name));
   return [...builtins, ...extras.filter((t) => !CHILD_EXCLUDED_TOOLS.has(t.name))];
 }
@@ -162,6 +157,8 @@ export interface BuildClineSpawnAgentToolOptions {
    */
   useMcpDeferral?: boolean;
   log?: (msg: string) => void;
+  /** Harness-owned execution lock; never chosen by the model. */
+  wrapChildTool?: (tool: AgentTool) => AgentTool;
 }
 
 /**
@@ -171,6 +168,8 @@ export interface BuildClineSpawnAgentToolOptions {
 export function buildClineSpawnAgentTool(options: BuildClineSpawnAgentToolOptions): AgentTool {
   const { spawn, cwd, extraChildTools = [], useMcpDeferral = true, log = () => {} } = options;
 
+  // SDK 0.0.47 ignores SpawnAgentToolConfig.hooks; runtime config forwards them.
+  let childDeferral: McpToolDeferral | null = null;
   const configProvider = createDelegatedAgentConfigProvider({
     providerId: spawn.providerId,
     modelId: spawn.modelId,
@@ -179,6 +178,10 @@ export function buildClineSpawnAgentTool(options: BuildClineSpawnAgentToolOption
     cwd,
     maxIterations: spawn.maxIterations,
     headers: sessionHeaders(),
+    hooks: {
+      beforeModel: (context: BeforeModelContext) => childDeferral?.beforeModel(context),
+      beforeTool: (context: BeforeToolContext) => childDeferral?.beforeTool(context),
+    },
   });
 
   // Stamp a fresh session id into connection defaults on every config read so
@@ -196,14 +199,11 @@ export function buildClineSpawnAgentTool(options: BuildClineSpawnAgentToolOption
     return { ...baseGetRuntime(), headers };
   };
 
-  // Fresh deferral per spawn; hooks close over the active instance.
-  let childDeferral: McpToolDeferral | null = null;
-
   const inner = createSpawnAgentTool({
     configProvider,
     defaultMaxIterations: spawn.maxIterations,
     createSubAgentTools: () => {
-      const base = buildSpawnChildTools(cwd, extraChildTools);
+      const base = buildSpawnChildTools(cwd, extraChildTools).map((tool) => options.wrapChildTool?.(tool) ?? tool);
       if (!useMcpDeferral) {
         log(`spawn child tools: ${base.length} (no MCP deferral)`);
         childDeferral = null;
@@ -216,10 +216,7 @@ export function buildClineSpawnAgentTool(options: BuildClineSpawnAgentToolOption
       );
       return childDeferral.allRegisteredTools();
     },
-    hooks: {
-      beforeModel: (context: BeforeModelContext) => childDeferral?.beforeModel(context),
-      beforeTool: (context: BeforeToolContext) => childDeferral?.beforeTool(context),
-    },
+    hookErrorMode: 'throw',
     onSubAgentStart: (ctx: SubAgentStartContext) => {
       log(
         `spawn_agent start subAgentId=${ctx.subAgentId} model=${spawn.modelId} ` +
@@ -228,7 +225,7 @@ export function buildClineSpawnAgentTool(options: BuildClineSpawnAgentToolOption
     },
     onSubAgentEnd: (ctx: SubAgentEndContext) => {
       if (ctx.error) {
-        log(`spawn_agent end subAgentId=${ctx.subAgentId} error=${ctx.error.message}`);
+        log(`spawn_agent end subAgentId=${ctx.subAgentId} error=${ctx.error.name}`);
         return;
       }
       log(
@@ -250,12 +247,13 @@ export function buildClineSpawnAgentTool(options: BuildClineSpawnAgentToolOption
 /** Parent system-prompt when spawn is enabled — parent orchestrates; child does all tools. */
 export function clineSpawnSystemPromptHint(modelId: string): string {
   return [
-    '## Sub-agents (spawn_agent) — REQUIRED for ALL tool use',
-    `You have NO tools except spawn_agent, ask_question, and submit_and_exit. A faster model (${modelId}) has file/shell/web/edit/skills/memory/MCP (send_message, cards, search, fitness, …).`,
-    'For ANY side effect or lookup — messaging Discord/Slack, web search, file ops, shell, memory, MCP — call spawn_agent with an explicit instruction, e.g. "Send this exact text to destination health via mcp__nanoclaw__send_message: …" or "Look up X and return a short summary."',
-    'Keep for yourself only: planning, deciding what to ask the user (ask_question), and composing the final user-facing answer after the child returns.',
-    'Pass a tight systemPrompt (role + constraints + allowed destinations/tools) and a concrete task. Prefer one focused spawn per job; spawn again if you need another step.',
-    'Do not invent tool results. If a child reports failure (auth, lock, empty), tell the user or spawn a different approach — do not retry endlessly yourself.',
-    'Child agents cannot spawn further and cannot ask the user — ask yourself if needed, then spawn again with the answer.',
+    '## Delegation (delegate_tasks) — REQUIRED for ALL tool use',
+    `You have only delegate_tasks, ask_question, and submit_and_exit. Workers use ${modelId} with file/shell/web/edit/skills/memory/MCP (including send_message).`,
+    'You own interpretation, synthesis, final decisions, and the user-facing response. Your only execution tool is delegate_tasks.',
+    'Decompose independent lookups into bounded objective-driven tasks in one batch. Do not pass the entire user request to one worker or split work into trivial one-tool steps.',
+    'For a simple bounded operation, delegate one task. Use another batch only for work depending on previous results or missing results.',
+    'Keep context minimal; specify expectedOutput. Workers cannot ask the user or delegate further.',
+    'Review partial, failed, and cancelled results before concluding. Never invent success or retry side effects blindly.',
+    'Respect external action permissions and approval requirements. Avoid conflicting writes and keep final integration and judgement yourself.',
   ].join('\n');
 }

@@ -192,8 +192,8 @@ export function buildClineBuiltinTools(cwd: string): AgentTool[] {
 }
 
 /**
- * Parent tools when spawn_agent is enabled: keep user I/O + turn completion only.
- * File/shell/web/edit/skills go to the child via spawn_agent to save parent tokens.
+ * Parent tools when delegation is enabled: keep user I/O + turn completion only.
+ * File/shell/web/edit/skills go to the child via delegate_tasks to save parent tokens.
  * (ask_question and submit_and_exit are mutually exclusive in one createDefaultTools
  * call, so we merge two passes — same pattern as buildClineBuiltinTools.)
  */

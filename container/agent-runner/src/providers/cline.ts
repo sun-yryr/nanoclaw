@@ -16,11 +16,8 @@ import {
   saveSessionSnapshot,
   trimClineSnapshotToHistoryBudget,
 } from './cline-sessions.js';
-import {
-  buildClineSpawnAgentTool,
-  clineSpawnSystemPromptHint,
-  resolveClineSpawnConfig,
-} from './cline-spawn.js';
+import { buildClineDelegateTasksTool, type ClineDelegateTasksTool } from './cline-delegation.js';
+import { clineSpawnSystemPromptHint, resolveClineSpawnConfig } from './cline-spawn.js';
 import {
   formatClineAuthFailureNotice,
   installSiwcFetchRewrite,
@@ -364,6 +361,8 @@ export class ClineProvider implements AgentProvider {
     let waiting: (() => void) | null = null;
     let ended = false;
     let aborted = false;
+    const queryAbort = new AbortController();
+    let activeAgent: Agent | null = null;
 
     const events: ProviderEvent[] = [];
     let eventWaiting: (() => void) | null = null;
@@ -417,11 +416,6 @@ export class ClineProvider implements AgentProvider {
         });
         const { providerId, baseUrl, apiKey, modelId, headers, useMcpDeferral } = runtime;
 
-        if (runtime.installFetchRewrite) {
-          uninstallFetchRewrite = installSiwcFetchRewrite();
-          log('SIWC fetch rewrite installed (store:false, strip truncation)');
-        }
-
         const spawnAuthMode = resolveClineAuthMode(process.env.CLINE_SPAWN_AUTH_MODE);
         const spawnConfig = resolveClineSpawnConfig({
           spawnModel: process.env.CLINE_SPAWN_MODEL,
@@ -433,6 +427,11 @@ export class ClineProvider implements AgentProvider {
           parentAuthMode: authMode,
           spawnAuthMode,
         });
+
+        if (runtime.installFetchRewrite || (spawnConfig && spawnAuthMode === 'siwc')) {
+          uninstallFetchRewrite = installSiwcFetchRewrite();
+          log('SIWC fetch rewrite installed (store:false, strip truncation)');
+        }
 
         log(
           `Creating Agent with authMode=${runtime.authMode}, providerId=${providerId}, baseUrl=${baseUrl}, modelId=${modelId}` +
@@ -451,26 +450,23 @@ export class ClineProvider implements AgentProvider {
           log(`Loaded ${mcpTools.length} MCP tools`);
         }
 
+        let delegation: ClineDelegateTasksTool | null = null;
         let tools: ReturnType<typeof createTool>[];
         let deferral: McpToolDeferral | null = null;
 
         if (spawnConfig) {
-          // Parent = orchestrator only: ask/submit + spawn_agent.
+          // Parent = orchestrator only: ask/submit + delegate_tasks.
           // Child = builtins + memory + all MCP (with its own deferral per spawn).
           const hostTools = buildClineParentToolsWithSpawn(input.cwd);
-          const spawnTool = buildClineSpawnAgentTool({
+          delegation = buildClineDelegateTasksTool({
             spawn: spawnConfig,
             cwd: input.cwd,
             extraChildTools: [memoryReadTool, memoryWriteTool, ...mcpTools],
             useMcpDeferral: spawnAuthMode !== 'siwc',
+            parentSignal: queryAbort.signal,
             log,
           });
-          tools = [...hostTools, spawnTool];
-          if (useMcpDeferral) {
-            // No MCP on parent → deferral is a no-op pass-through of always-load tools.
-            deferral = new McpToolDeferral(tools);
-            tools = deferral.allRegisteredTools();
-          }
+          tools = [...hostTools, delegation];
           log(
             `spawn-parent tools: ${tools.map((t) => t.name).join(', ')} ` +
               `(child model=${spawnConfig.modelId} @ ${spawnConfig.baseUrl}; MCP×${mcpTools.length} on child only)`,
@@ -532,6 +528,9 @@ export class ClineProvider implements AgentProvider {
           // Pass through verbatim; invalid values fail at the SDK / upstream.
           ...(reasoningEffort ? { reasoningEffort: reasoningEffort as 'low' | 'medium' | 'high' | 'xhigh' } : {}),
         });
+
+        activeAgent = agent;
+        if (aborted) return;
 
         if (snapshotToRestore?.messages?.length) {
           agent.restore(snapshotToRestore.messages);
@@ -630,6 +629,7 @@ export class ClineProvider implements AgentProvider {
               `${imageCount} image(s), ${videoCount} video(s)`,
           );
         }
+        delegation?.resetTurn();
         const runPromise = agent
           // Cline accepts string | AgentMessage; multimodal uses a user-role
           // content array (may include video_url passthrough beyond AgentMessagePart).
@@ -709,6 +709,7 @@ export class ClineProvider implements AgentProvider {
 
             let continueDone = false;
             let continueResult: Awaited<ReturnType<typeof agent.continue>> | undefined;
+            delegation?.resetTurn();
             const continuePromise = agent
               .continue(toAgentInput(followUp.text, followUp.userContent) as Parameters<typeof agent.continue>[0])
               .then((r: AgentRunResult) => {
@@ -783,6 +784,8 @@ export class ClineProvider implements AgentProvider {
       abort: () => {
         log('abort() called');
         aborted = true;
+        queryAbort.abort();
+        activeAgent?.abort();
         kick();
       },
     };

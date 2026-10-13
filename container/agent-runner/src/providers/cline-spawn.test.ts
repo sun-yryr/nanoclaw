@@ -58,9 +58,7 @@ describe('resolveClineSpawnConfig', () => {
   });
 
   it('throws on invalid spawn API', () => {
-    expect(() =>
-      resolveClineSpawnConfig({ spawnModel: 'x', spawnApi: 'auto' }),
-    ).toThrow(/Invalid CLINE_SPAWN_API/);
+    expect(() => resolveClineSpawnConfig({ spawnModel: 'x', spawnApi: 'auto' })).toThrow(/Invalid CLINE_SPAWN_API/);
   });
 
   it('does not inherit SIWC parent base URL without explicit spawn auth or other endpoint', () => {
@@ -157,7 +155,8 @@ describe('clineSpawnSystemPromptHint', () => {
   it('requires spawn for all tool use including messaging', () => {
     const hint = clineSpawnSystemPromptHint('deepseek-v4.1-flash');
     expect(hint).toContain('deepseek-v4.1-flash');
-    expect(hint).toContain('spawn_agent');
+    expect(hint).toContain('delegate_tasks');
+    expect(hint).not.toContain('spawn_agent');
     expect(hint).toContain('ALL tool use');
     expect(hint).toContain('send_message');
   });

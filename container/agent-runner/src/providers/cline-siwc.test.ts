@@ -163,6 +163,9 @@ describe('isSiwcResponsesRequestUrl', () => {
   it('matches /v1/responses', () => {
     expect(isSiwcResponsesRequestUrl('https://api.openai.com/v1/responses')).toBe(true);
     expect(isSiwcResponsesRequestUrl('https://api.openai.com/v1/chat/completions')).toBe(false);
+    expect(isSiwcResponsesRequestUrl('https://child.example/v1/responses')).toBe(false);
+    expect(isSiwcResponsesRequestUrl('/v1/responses')).toBe(false);
+    expect(isSiwcResponsesRequestUrl('https://api.openai.com.attacker.example/responses')).toBe(false);
   });
 });
 
@@ -192,6 +195,26 @@ describe('installSiwcFetchRewrite', () => {
       stream: true,
       store: false,
     });
+  });
+
+  it('SIWC parent does not rewrite a different Responses child host', async () => {
+    const bodies: string[] = [];
+    const fakeFetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(String(init?.body));
+      return new Response('{}');
+    }) as typeof fetch;
+    const uninstall = installSiwcFetchRewrite(fakeFetch);
+    const original = JSON.stringify({ model: 'child', store: true, temperature: 0.2, truncation: 'auto' });
+    try {
+      await Promise.all([
+        fetch('https://api.openai.com/v1/responses', { method: 'POST', body: original }),
+        fetch('https://child.example/v1/responses', { method: 'POST', body: original }),
+      ]);
+      expect(JSON.parse(bodies[0]!)).toEqual({ model: 'child', store: false });
+      expect(bodies[1]).toBe(original);
+    } finally {
+      uninstall();
+    }
   });
 
   it('leaves non-Responses requests alone', async () => {
