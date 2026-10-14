@@ -1,3 +1,4 @@
+import { createAgentProgressPoster, type AgentProgressPoster } from './agent-progress/poster.js';
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import {
   getPendingMessages,
@@ -31,13 +32,7 @@ import {
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
-import type {
-  AgentProvider,
-  AgentQuery,
-  ProviderEvent,
-  ProviderExchange,
-  UserContentPart,
-} from './providers/types.js';
+import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange, UserContentPart } from './providers/types.js';
 import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
 import { buildUserContentFromMessages } from './media/index.js';
 import { createTurnStatusPoster, type TurnStatusPoster } from './turn-status.js';
@@ -363,10 +358,7 @@ function formatMessagesWithCommands(
  * When multimodal parts exist, keep media blocks and replace the text part
  * with the command-aware prompt from formatMessagesWithCommands.
  */
-function mergeUserContent(
-  userContent: UserContentPart[] | undefined,
-  prompt: string,
-): UserContentPart[] | undefined {
+function mergeUserContent(userContent: UserContentPart[] | undefined, prompt: string): UserContentPart[] | undefined {
   if (!userContent || userContent.length === 0) return undefined;
 
   const media = userContent.filter((p) => p.type !== 'text');
@@ -411,6 +403,7 @@ export async function processQuery(
   // Once-per-turn guard for the task-run "<message> block was not delivered"
   // nudge — mirrors unwrappedNudged for chat turns.
   let taskBlockNudged = false;
+  let emptyNudged = false;
   // How many <message> blocks were delivered from 'text' events this turn
   // (chat runs, mid-turn delivery providers only). A frame-local count, never
   // keyed by content: it feeds the result door's nudge decision ("did this
@@ -443,7 +436,10 @@ export async function processQuery(
   let midTurnTail = '';
   // Progressive channel status (Discord sticky edit via kind=turn_status).
   // Recreated when a queued follow-up turn is adopted so each turn posts its own.
-  let turnStatus: TurnStatusPoster | null = createTurnStatusPoster(routing);
+  const richProgress = () => providerName === 'cline' && routing.channelType === 'discord';
+  let agentProgress: AgentProgressPoster | null =
+    richProgress() && initialPrompt ? createAgentProgressPoster(routing) : null;
+  let turnStatus: TurnStatusPoster | null = richProgress() ? null : createTurnStatusPoster(routing);
   // Prompt queue for the exchange hook — each result event consumes the
   // oldest unanswered prompt. Retries append the original user prompt at
   // their position in the provider input queue.
@@ -460,21 +456,34 @@ export async function processQuery(
     routing: RoutingContext;
     unwrappedNudged: boolean;
     taskBlockNudged: boolean;
+    emptyNudged: boolean;
+    progress?: AgentProgressPoster | null;
   };
   const queuedTurns: QueuedTurn[] = [];
   const adoptTurn = (next: QueuedTurn): void => {
     Object.assign(routing, next.routing);
     unwrappedNudged = next.unwrappedNudged;
     taskBlockNudged = next.taskBlockNudged;
+    emptyNudged = next.emptyNudged;
     publishReplyRoute(routing);
     answering = true;
-    turnStatus = createTurnStatusPoster(routing);
+    agentProgress = next.progress ?? (richProgress() ? createAgentProgressPoster(routing) : null);
+    turnStatus = richProgress() ? null : createTurnStatusPoster(routing);
   };
   // A retry is another provider input, behind any follow-ups already pushed.
   // Preserve its original route, prompt and retry guards until it is answered.
-  const pushRetry = (prompt: string): void => {
-    query.push(prompt);
-    queuedTurns.push({ routing: { ...routing }, unwrappedNudged, taskBlockNudged });
+  const pushRetry = (prompt: string, finalOnly = false): void => {
+    if (finalOnly) {
+      if (!query.requestFinalResponse) throw new Error('Tool-free answer recovery is unavailable');
+      query.requestFinalResponse(prompt);
+    } else query.push(prompt);
+    queuedTurns.push({
+      routing: { ...routing },
+      unwrappedNudged,
+      taskBlockNudged,
+      emptyNudged,
+      progress: agentProgress,
+    });
     archivePrompts.push(archivePrompts[0] ?? initialPrompt);
   };
 
@@ -572,6 +581,7 @@ export async function processQuery(
           routing: extractRouting(keep),
           unwrappedNudged: false,
           taskBlockNudged: false,
+          emptyNudged: false,
         };
         if (answering) queuedTurns.push(next);
         else adoptTurn(next);
@@ -622,7 +632,10 @@ export async function processQuery(
         // effectively orphaned and the next message started a blank
         // Claude session with no prior context.
         setContinuation(providerName, event.continuation);
+      } else if (event.type === 'delegation') {
+        await agentProgress?.update(event.event).catch(() => log('agent-progress write failed'));
       } else if (event.type === 'progress') {
+        await agentProgress?.update().catch(() => log('agent-progress write failed'));
         void turnStatus?.update(event.message).catch((err) => {
           log(`turn-status update failed: ${err instanceof Error ? err.message : String(err)}`);
         });
@@ -648,9 +661,22 @@ export async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         const resultText = event.text ?? '';
-        const failed = event.isError === true;
+        let failed = event.isError === true;
+        const alreadyDelivered = midTurnSent > 0 || chatRowWrittenSince(turnStartSeq);
+        const emptyMissing =
+          providerName === 'cline' &&
+          answering &&
+          sendsFailureNotice(routing) &&
+          !failed &&
+          !resultText.trim() &&
+          !alreadyDelivered &&
+          !signal?.aborted &&
+          !endedForCommand;
+        const emptyFailure = '回答を生成できませんでした。処理の完了状況は未確認です。操作の重複を避けて停止しました。';
+        if (emptyMissing && (emptyNudged || !query.requestFinalResponse)) failed = true;
         // Close the sticky status before any final reply so Discord shows
         // Done, then the answer as a separate bubble.
+        let retryProgress = false;
         const statusFinishing = turnStatus?.finish(failed ? 'Failed' : undefined);
         turnStatus = null;
         if (statusFinishing) {
@@ -658,7 +684,28 @@ export async function processQuery(
             log(`turn-status finish failed: ${err instanceof Error ? err.message : String(err)}`);
           });
         }
-        if (resultText || failed) {
+        if (emptyMissing && !emptyNudged && query.requestFinalResponse) {
+          emptyNudged = true;
+          retryProgress = true;
+          const names = getAllDestinations()
+            .map((d) => d.name)
+            .join(', ');
+          pushRetry(
+            '<system>Your previous run ended without any delivered answer. Use only the results and history already available. ' +
+              'Do not call tools, resume workers, repeat writes, or start new work. Give the user a final answer, ' +
+              'or clearly report what could not be completed and what remains unverified. ' +
+              `Wrap it in <message to="name">...</message>. Destinations: ${names}. ` +
+              `Recover this original request (quoted context, not a new action): ${JSON.stringify((archivePrompts[0] ?? initialPrompt).slice(0, 12000))}</system>`,
+            true,
+          );
+          notifyExchangeComplete(onExchangeComplete, {
+            prompt: archivePrompts[0] ?? initialPrompt,
+            result: 'No final answer was generated.',
+            continuation: queryContinuation ?? initialContinuation,
+            status: 'undelivered',
+          });
+          archivePrompts.shift();
+        } else if (resultText || failed) {
           const { hasUnwrapped, taskBlocks } = await dispatchResultText(resultText, routing, {
             midTurnSent,
             // For mid-turn delivery providers the result door NEVER delivers
@@ -674,6 +721,9 @@ export async function processQuery(
             // and the retry streams through the mid-turn door.
             turnDelivered: midTurnCompleteDelivery ? midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) : undefined,
           });
+          // Recovery has one opportunity to deliver a correctly wrapped answer.
+          // Never reopen execution because its output is empty or still unwrapped.
+          if (providerName === 'cline' && emptyNudged && hasUnwrapped && !alreadyDelivered) failed = true;
           // Completed partial output remains deliverable, but an explicit
           // provider failure must keep its status and never trigger a retry.
           const willRetryTaskBlocks = !failed && shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
@@ -688,7 +738,9 @@ export async function processQuery(
             // A failed turn needs a visible notice even after a partial reply.
             // Only the provider's dedicated error field is channel content;
             // unwrapped model output and raw diagnostics remain private.
-            const notice = event.error ?? 'The agent run failed. Check the logs for details.';
+            const notice =
+              event.error ??
+              (emptyNudged || emptyMissing ? emptyFailure : 'The agent run failed. Check the logs for details.');
             if (sendsFailureNotice(routing)) await deliverErrorResult(routing, notice);
             // Keep the reason in the runner log, since the skipped notice may
             // be the only place it would have been recorded.
@@ -705,6 +757,7 @@ export async function processQuery(
             continuation: queryContinuation ?? initialContinuation,
             status: failed ? 'error' : hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
           });
+          retryProgress = willRetryWrapping || willRetryTaskBlocks;
           if (willRetryWrapping) {
             unwrappedNudged = true;
             const destinations = getAllDestinations();
@@ -736,6 +789,11 @@ export async function processQuery(
         // genuinely re-sending the same body still delivers. The assembly
         // buffer dies with the turn: a fragment that never closed is not
         // carried into the next turn — the wrap-nudge owns that case.
+        if (!retryProgress)
+          await agentProgress
+            ?.finish(signal?.aborted || endedForCommand ? 'cancelled' : failed ? 'failed' : 'completed')
+            .catch(() => log('agent-progress finish failed'));
+        agentProgress = null;
         midTurnSent = 0;
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
@@ -750,6 +808,8 @@ export async function processQuery(
     done = true;
     const cancelled = endedForCommand || signal?.aborted;
     const errMsg = err instanceof Error ? err.message : String(err);
+    await agentProgress?.finish(cancelled ? 'cancelled' : 'failed').catch(() => log('agent-progress finish failed'));
+    agentProgress = null;
     const statusFinishing = turnStatus?.finish(cancelled ? undefined : 'Failed');
     turnStatus = null;
     if (statusFinishing) {
@@ -800,6 +860,9 @@ export async function processQuery(
     // in the exchange archive and runner log, never in the channel notice.
     throw err;
   } finally {
+    await agentProgress?.finish('cancelled').catch(() => log('agent-progress finish failed'));
+    for (const queued of queuedTurns)
+      await queued.progress?.finish('cancelled').catch(() => log('agent-progress finish failed'));
     done = true;
     clearInterval(pollHandle);
   }

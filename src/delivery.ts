@@ -318,13 +318,18 @@ async function drainSession(session: Session): Promise<void> {
         (msg.kind === 'chat' || msg.kind === 'chat-sdk') &&
         (priorDeliveredCount === 0 || turnStatusOnlySessions.has(session.id));
       delivered.add(msg.id);
-      if (msg.kind === 'turn_status' && priorDeliveredCount === 0) {
+      if ((msg.kind === 'turn_status' || msg.kind === 'agent_progress') && priorDeliveredCount === 0) {
         turnStatusOnlySessions.add(session.id);
       } else if (msg.kind === 'chat' || msg.kind === 'chat-sdk') {
         turnStatusOnlySessions.delete(session.id);
       }
       await clearAttemptRow(msg.id);
-      if (msg.kind !== 'system' && msg.kind !== 'turn_status' && msg.channelType !== 'agent') {
+      if (
+        msg.kind !== 'system' &&
+        msg.kind !== 'turn_status' &&
+        msg.kind !== 'agent_progress' &&
+        msg.channelType !== 'agent'
+      ) {
         pauseTypingRefreshAfterDelivery(session.id);
         if (msg.kind !== 'task_log') {
           // Cross-session context: echo the delivered reply into the
@@ -464,6 +469,7 @@ async function deliverMessage(
   // (instead of marking it delivered when nothing was actually delivered,
   // which was the pre-refactor bug).
   let deliverInstance: string | undefined;
+  let deliverMessagingGroupId: string | undefined;
   if (msg.channelType && msg.platformId) {
     // Resolve the messaging group ORIGIN-SESSION-FIRST: when the message
     // targets the session's own chat address, the origin row wins even if
@@ -510,6 +516,7 @@ async function deliverMessage(
       }
     }
     deliverInstance = mg.instance;
+    deliverMessagingGroupId = mg.id;
   }
 
   // Track pending questions for ask_user_question flow.
@@ -545,6 +552,29 @@ async function deliverMessage(
   if (!msg.channelType || !msg.platformId) {
     log.warn('Message missing routing fields', { id: msg.id });
     return;
+  }
+
+  // Host-stamped immutable routing context. A container cannot choose a
+  // different session/group/instance for a persistent progress run.
+  if (msg.kind === 'agent_progress') {
+    if (msg.channelType !== 'discord' || !deliverMessagingGroupId) return;
+    return deliveryAdapter.deliver(
+      msg.channelType,
+      msg.platformId,
+      msg.threadId,
+      msg.kind,
+      JSON.stringify({
+        snapshot: content,
+        route: {
+          sessionId: session.id,
+          agentGroupId: session.agent_group_id,
+          messagingGroupId: deliverMessagingGroupId,
+          inReplyTo: msg.inReplyTo,
+        },
+      }),
+      undefined,
+      deliverInstance,
+    );
   }
 
   // Progressive turn status: sticky-edit one channel message per destination

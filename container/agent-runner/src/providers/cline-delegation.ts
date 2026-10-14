@@ -1,7 +1,17 @@
 /** Turn-scoped batching over the pinned Cline spawn tool. No automatic retries. */
 import { createTool, type AgentTool, type AgentToolContext } from '@cline/sdk';
 import { z } from 'zod';
-import { buildClineSpawnAgentTool, type BuildClineSpawnAgentToolOptions } from './cline-spawn.js';
+import crypto from 'node:crypto';
+import {
+  PROGRESS_TITLE_MAX_LENGTH,
+  safeProgressTitle,
+  type DelegationProgress,
+} from '../agent-progress/model.generated.js';
+import {
+  buildClineSpawnAgentTool,
+  type BuildClineSpawnAgentToolOptions,
+  type ClineSpawnAgentTool,
+} from './cline-spawn.js';
 
 export const WORKER_SYSTEM_PROMPT = [
   'You are a worker executing exactly one bounded subtask for a parent assistant.',
@@ -43,6 +53,15 @@ export function delegationInputSchema(maxTasks = 4) {
           z
             .object({
               id: z.string().trim().min(1).max(40),
+              title: z
+                .string()
+                .trim()
+                .min(1)
+                .max(PROGRESS_TITLE_MAX_LENGTH)
+                .optional()
+                .describe(
+                  'Specific public task title (up to 60 characters), e.g. 公式カレンダーで対象の収集日を確認. No private data, names, email subjects, URLs, paths, credentials, mentions, or raw objective/context.',
+                ),
               objective: z.string().trim().min(1).max(1500),
               context: z.string().trim().min(1).max(3000).optional(),
               expectedOutput: z.string().trim().min(1).max(1000),
@@ -65,6 +84,8 @@ export interface DelegatedTaskResult {
   error?: string;
   usage?: { inputTokens: number; outputTokens: number };
   iterations?: number;
+  finishReason?: string;
+  recovery?: { id: string; reason: 'max_iterations'; remainingResumes: 1 };
   durationMs: number;
 }
 export interface DelegateTasksOutput {
@@ -105,7 +126,7 @@ class Semaphore {
   }
 }
 
-export type ClineDelegateTasksTool = AgentTool & { resetTurn(): void };
+export type ClineDelegateTasksTool = AgentTool & { resetTurn(): void; resumeTool: AgentTool };
 const CHILD_TIMEOUT_MS = 300_000;
 
 export function buildClineDelegateTasksTool(
@@ -113,6 +134,7 @@ export function buildClineDelegateTasksTool(
     limits?: DelegationLimits;
     childTimeoutMs?: number;
     parentSignal?: AbortSignal;
+    onProgress?: (event: DelegationProgress) => void;
   },
 ): ClineDelegateTasksTool {
   // Validate supplied limits through the same fail-fast path as environment config.
@@ -130,13 +152,34 @@ export function buildClineDelegateTasksTool(
   // and the existing registry-lifetime MCP retry budget intentionally remain shared.
   const toolExecution = new Semaphore(1);
   let reserved = 0;
+  let batches = 0;
+  type TaskProgress = { batchId: string; taskId: string; ordinal: number; title?: string };
+  const batchOrdinals = new Map<string, number>();
+  const taskStates = new Map<string, { batchId: string; state: DelegationProgress['state'] }>();
+  const recoveries = new Map<
+    string,
+    { task: DelegatedTask; child: ClineSpawnAgentTool; progress: TaskProgress; owner: string; durationMs: number }
+  >();
+  const emit = (event: DelegationProgress) => {
+    if (event.kind === 'task') taskStates.set(event.taskId, { batchId: event.batchId, state: event.state });
+    try {
+      options.onProgress?.(event);
+    } catch {
+      /* UI cannot fail a worker. */
+    }
+  };
   let pendingBatches = 0;
   const childTimeoutMs = options.childTimeoutMs ?? CHILD_TIMEOUT_MS;
   if (!Number.isSafeInteger(childTimeoutMs) || childTimeoutMs < 1 || childTimeoutMs > CHILD_TIMEOUT_MS) {
     throw new Error('Invalid child timeout');
   }
 
-  async function runTask(task: DelegatedTask, context: AgentToolContext): Promise<DelegatedTaskResult> {
+  async function runTask(
+    task: DelegatedTask,
+    context: AgentToolContext,
+    progress: TaskProgress,
+    resume?: { child: ClineSpawnAgentTool; instruction: string; durationMs: number },
+  ): Promise<DelegatedTaskResult> {
     const start = performance.now();
     let result: DelegatedTaskResult = { id: task.id, status: 'failed', durationMs: 0 };
     const toolRuns = new Set<Promise<unknown>>();
@@ -144,6 +187,7 @@ export function buildClineDelegateTasksTool(
       context.signal && options.parentSignal
         ? AbortSignal.any([context.signal, options.parentSignal])
         : (context.signal ?? options.parentSignal);
+    let timedOut = false;
     let release: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
@@ -153,7 +197,11 @@ export function buildClineDelegateTasksTool(
     try {
       release = await children.acquire(controller.signal);
       controller.signal.throwIfAborted();
-      timer = setTimeout(() => controller.abort(new Error('Worker timeout')), childTimeoutMs);
+      emit({ kind: 'task', ...progress, state: 'running' });
+      timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort(new Error('Worker timeout'));
+      }, childTimeoutMs);
       const wrap = (tool: AgentTool): AgentTool => ({
         ...tool,
         execute(input: unknown, ctx: AgentToolContext) {
@@ -173,18 +221,23 @@ export function buildClineDelegateTasksTool(
         },
       });
       // Every child owns configProvider, hooks, deferral and session headers.
-      const child = buildClineSpawnAgentTool({ ...options, wrapChildTool: wrap });
-      const output = (await child.execute(
-        {
-          systemPrompt: WORKER_SYSTEM_PROMPT,
-          task: JSON.stringify({
-            objective: task.objective,
-            context: task.context,
-            expectedOutput: task.expectedOutput,
-          }),
-        },
-        { ...context, signal: controller.signal },
-      )) as {
+      const child = resume?.child ?? buildClineSpawnAgentTool({ ...options, wrapChildTool: wrap });
+      const executionContext = { ...context, signal: controller.signal };
+      const output = (
+        resume
+          ? await child.resume(resume.instruction, executionContext, wrap)
+          : await child.execute(
+              {
+                systemPrompt: WORKER_SYSTEM_PROMPT,
+                task: JSON.stringify({
+                  objective: task.objective,
+                  context: task.context,
+                  expectedOutput: task.expectedOutput,
+                }),
+              },
+              executionContext,
+            )
+      ) as {
         text: string;
         finishReason: string;
         iterations: number;
@@ -196,12 +249,26 @@ export function buildClineDelegateTasksTool(
           : output.finishReason === 'completed'
             ? 'completed'
             : 'partial';
+      let recovery: DelegatedTaskResult['recovery'];
+      if (
+        !resume &&
+        reserved < limits.maxTasksPerTurn &&
+        !controller.signal.aborted &&
+        output.finishReason === 'max_iterations' &&
+        child.canResume()
+      ) {
+        const id = crypto.randomUUID();
+        recoveries.set(id, { task, child, progress, owner: context.agentId, durationMs: performance.now() - start });
+        recovery = { id, reason: 'max_iterations', remainingResumes: 1 };
+      }
       return (result = {
         id: task.id,
         status,
         text: output.text,
         usage: output.usage,
         iterations: output.iterations,
+        finishReason: output.finishReason,
+        ...(recovery ? { recovery } : {}),
         durationMs: performance.now() - start,
       });
     } catch {
@@ -221,6 +288,14 @@ export function buildClineDelegateTasksTool(
       parentSignal?.removeEventListener('abort', abort);
       release?.();
       result.durationMs = performance.now() - start;
+      const saved = result.recovery && recoveries.get(result.recovery.id);
+      if (saved) saved.durationMs = result.durationMs;
+      emit({
+        kind: 'task',
+        ...progress,
+        state: timedOut ? 'timed_out' : result.status,
+        durationMs: result.durationMs + (resume?.durationMs ?? 0),
+      });
     }
   }
 
@@ -236,13 +311,88 @@ export function buildClineDelegateTasksTool(
     execute: async (input: unknown, context: AgentToolContext): Promise<DelegateTasksOutput> => {
       const { tasks } = schema.parse(input);
       if (reserved + tasks.length > limits.maxTasksPerTurn) throw new Error('Delegation turn task budget exceeded');
+      const firstOrdinal = reserved + 1;
+      const batchId = crypto.randomUUID();
+      const ordinal = ++batches;
+      batchOrdinals.set(batchId, ordinal);
+      emit({ kind: 'batch', batchId, ordinal, state: 'running' });
+      const progress = tasks.map((task, index) => ({
+        batchId,
+        taskId: crypto.randomUUID(),
+        ordinal: firstOrdinal + index,
+        title: safeProgressTitle(task.title, firstOrdinal + index),
+      }));
+      for (const task of progress) emit({ kind: 'task', ...task, state: 'queued' });
       reserved += tasks.length; // Synchronous reservation across concurrent calls.
       pendingBatches++;
       try {
-        const results = await Promise.all(tasks.map((task) => runTask(task, context)));
+        const results = await Promise.all(tasks.map((task, index) => runTask(task, context, progress[index]!)));
         const summary = { completed: 0, partial: 0, failed: 0, cancelled: 0 };
         for (const result of results) summary[result.status]++;
+        emit({
+          kind: 'batch',
+          batchId,
+          ordinal,
+          state:
+            summary.completed === tasks.length
+              ? 'completed'
+              : summary.cancelled === tasks.length
+                ? 'cancelled'
+                : summary.failed === tasks.length
+                  ? 'failed'
+                  : 'partial',
+        });
         return { results, summary };
+      } finally {
+        pendingBatches--;
+      }
+    },
+  });
+  const resumeSchema = z
+    .object({ recoveryId: z.string().uuid(), instruction: z.string().trim().min(1).max(1500) })
+    .strict();
+  const resumeTool = createTool({
+    name: 'resume_delegated_task',
+    description:
+      'Explicitly continue a worker that reached max_iterations, retaining its history and original objective. One continuation per worker in this parent turn. Verify uncertain side effects instead of repeating them.',
+    inputSchema: z.toJSONSchema(resumeSchema),
+    retryable: false,
+    timeoutMs: limits.maxTasksPerTurn * childTimeoutMs + 30000,
+    async execute(input: unknown, context: AgentToolContext) {
+      const { recoveryId, instruction } = resumeSchema.parse(input);
+      const saved = recoveries.get(recoveryId);
+      if (!saved || saved.owner !== context.agentId)
+        throw new Error('Recovery ID is unavailable, expired, or already used');
+      if (reserved >= limits.maxTasksPerTurn) throw new Error('Delegation turn task budget exceeded');
+      // Atomic consume/reservation before awaiting, including parallel calls.
+      recoveries.delete(recoveryId);
+      reserved++;
+      pendingBatches++;
+      const ordinal = batchOrdinals.get(saved.progress.batchId)!;
+      emit({ kind: 'batch', batchId: saved.progress.batchId, ordinal, state: 'running' });
+      emit({ kind: 'task', ...saved.progress, state: 'queued' });
+      try {
+        const result = await runTask(saved.task, context, saved.progress, {
+          child: saved.child,
+          instruction,
+          durationMs: saved.durationMs,
+        });
+        const states = [...taskStates.values()].filter((t) => t.batchId === saved.progress.batchId).map((t) => t.state);
+        emit({
+          kind: 'batch',
+          batchId: saved.progress.batchId,
+          ordinal,
+          state: states.every((s) => s === 'completed')
+            ? 'completed'
+            : states.some((s) => s === 'running' || s === 'queued')
+              ? 'running'
+              : states.every((s) => s === 'failed')
+                ? 'failed'
+                : states.every((s) => s === 'cancelled' || s === 'timed_out')
+                  ? 'cancelled'
+                  : 'partial',
+        });
+        return result;
       } finally {
         pendingBatches--;
       }
@@ -250,10 +400,15 @@ export function buildClineDelegateTasksTool(
   });
   return {
     ...tool,
+    resumeTool,
     resetTurn() {
       if (pendingBatches || toolExecution.active)
         throw new Error('Cannot reset delegation budget while children are running');
       reserved = 0;
+      batches = 0;
+      recoveries.clear();
+      batchOrdinals.clear();
+      taskStates.clear();
     },
   };
 }

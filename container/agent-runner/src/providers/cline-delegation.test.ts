@@ -7,9 +7,183 @@ import {
   type DelegateTasksOutput,
 } from './cline-delegation.js';
 import { McpRetryGuard } from './cline-mcp-retry.js';
+import type { DelegationProgress } from '../agent-progress/model.generated.js';
+import { FinalResponseGate } from './cline-final-response.js';
 const context: AgentToolContext = { agentId: 'parent', iteration: 1 };
 const task = (id: string) => ({ id, objective: id, expectedOutput: 'concise result' });
+
+it('requires explicit parent resumption after max_iterations, retains evidence and session, and never repeats a successful action', async () => {
+  let requests = 0,
+    writes = 0;
+  const sessions = new Set<string>();
+  const events: DelegationProgress[] = [];
+  const f = fixture((body, req) => {
+    sessions.add(req.headers.get('x-opencode-session')!);
+    const step = requests++;
+    if (step === 0) return completion('', [{ name: 'tool_search', args: { query: 'external' } }]);
+    expect(body.tools?.some((tool) => tool.function.name === 'mcp__external__write_once')).toBe(true);
+    if (step === 1) return completion('', [{ name: 'mcp__external__write_once', args: {} }]);
+    expect(JSON.stringify(body.messages)).toContain('APPLIED-ONCE');
+    return completion('Verified existing change; finished remaining reporting.');
+  }, 2);
+  try {
+    const tool = buildClineDelegateTasksTool({
+      ...f.options,
+      onProgress: (e) => {
+        events.push(e);
+      },
+      extraChildTools: [
+        createTool({
+          name: 'mcp__external__write_once',
+          description: 'synthetic action',
+          inputSchema: { type: 'object' },
+          execute: async () => {
+            writes++;
+            return 'APPLIED-ONCE';
+          },
+        }),
+      ],
+    });
+    const first = (await tool.execute(tasks('work'), context)) as DelegateTasksOutput;
+    expect(first.results[0]!.finishReason).toBe('max_iterations');
+    expect(first.results[0]!.recovery).toBeDefined();
+    expect(requests).toBe(2); // No automatic retry.
+    const input = {
+      recoveryId: first.results[0]!.recovery!.id,
+      instruction: 'Verify the existing change and complete only the remaining report.',
+    };
+    await expect(tool.resumeTool.execute(input, { ...context, agentId: 'other-parent' })).rejects.toThrow(
+      /unavailable/,
+    );
+    const resumed = (await tool.resumeTool.execute(
+      input,
+      context,
+    )) as import('./cline-delegation.js').DelegatedTaskResult;
+    expect(resumed.status).toBe('completed');
+    expect(resumed.recovery).toBeUndefined();
+    expect(writes).toBe(1);
+    expect(sessions.size).toBe(1);
+    expect(new Set(events.filter((e) => e.kind === 'task').map((e) => (e.kind === 'task' ? e.taskId : ''))).size).toBe(
+      1,
+    );
+    await expect(tool.resumeTool.execute(input, context)).rejects.toThrow(/already used/);
+  } finally {
+    f.stop();
+  }
+});
+it('charges resumption to the shared turn budget and expires checkpoints on the next user turn', async () => {
+  const f = fixture(() => completion('', [{ name: 'missing', args: {} }]), 1);
+  try {
+    const tool = buildClineDelegateTasksTool({
+      ...f.options,
+      limits: { maxConcurrency: 3, maxTasksPerBatch: 4, maxTasksPerTurn: 2 },
+    });
+    const first = (await tool.execute(tasks('a'), context)) as DelegateTasksOutput;
+    const recoveryId = first.results[0]!.recovery!.id;
+    await tool.execute(tasks('b'), context);
+    await expect(
+      tool.resumeTool.execute({ recoveryId, instruction: 'Continue only missing work' }, context),
+    ).rejects.toThrow(/budget/);
+    tool.resetTurn();
+    await expect(tool.resumeTool.execute({ recoveryId, instruction: 'Continue' }, context)).rejects.toThrow(/expired/);
+  } finally {
+    f.stop();
+  }
+});
+
+it('emits safe titled child lifecycle with independent IDs, and distinguishes timeout from cancellation', async () => {
+  const events: DelegationProgress[] = [];
+  const f = fixture(() => completion());
+  try {
+    const tool = buildClineDelegateTasksTool({
+      ...f.options,
+      onProgress: (event) => {
+        events.push(event);
+      },
+    });
+    await tool.execute(
+      {
+        tasks: [
+          {
+            id: 'PRIVATE-ID',
+            objective: 'PRIVATE-OBJECTIVE',
+            context: 'PRIVATE-CONTEXT',
+            title: '現在の通知設定と収集日を照合',
+            expectedOutput: 'PRIVATE-OUTPUT',
+          },
+        ],
+      },
+      context,
+    );
+    const states = events.filter((e) => e.kind === 'task').map((e) => e.state);
+    expect(states).toEqual(['queued', 'running', 'completed']);
+    expect(JSON.stringify(events)).not.toContain('PRIVATE');
+    expect(events.filter((e) => e.kind === 'task').every((e) => e.title === '現在の通知設定と収集日を照合')).toBe(true);
+    expect(events.filter((e) => e.kind === 'batch').map((e) => e.state)).toEqual(['running', 'completed']);
+    events.length = 0;
+    await tool.execute({ tasks: [{ ...task('second'), title: 'Bearer PRIVATE' }] }, context);
+    expect(events.filter((e) => e.kind === 'task').every((e) => e.title === 'タスク 2')).toBe(true);
+    expect(JSON.stringify(events)).not.toContain('PRIVATE');
+  } finally {
+    f.stop();
+  }
+  const slow = fixture(async () => {
+    await new Promise((r) => setTimeout(r, 100));
+    return completion();
+  });
+  try {
+    const tool = buildClineDelegateTasksTool({
+      ...slow.options,
+      childTimeoutMs: 20,
+      onProgress: (e) => {
+        events.push(e);
+      },
+    });
+    await tool.execute(tasks('timeout'), context);
+    expect(events.some((e) => e.kind === 'task' && e.state === 'timed_out')).toBe(true);
+    const controller = new AbortController();
+    controller.abort();
+    await tool.execute(tasks('cancelled'), { ...context, signal: controller.signal });
+    expect(events.some((e) => e.kind === 'task' && e.state === 'cancelled')).toBe(true);
+  } finally {
+    slow.stop();
+  }
+});
 const tasks = (...ids: string[]) => ({ tasks: ids.map(task) });
+
+it('real SDK final-only mode makes one model request and executes zero tools even for a hallucinated call', async () => {
+  let requests = 0,
+    actions = 0;
+  const f = fixture((body) => {
+    requests++;
+    expect(body.tools ?? []).toEqual([]);
+    return completion('', [{ name: 'mcp__nanoclaw__action', args: {} }]);
+  });
+  try {
+    const gate = new FinalResponseGate();
+    gate.begin(true);
+    const parent = new Agent({
+      ...f.options.spawn,
+      hooks: gate.hooks({}),
+      tools: [
+        createTool({
+          name: 'mcp__nanoclaw__action',
+          description: 'synthetic',
+          inputSchema: { type: 'object' },
+          execute: async () => {
+            actions++;
+            return 'done';
+          },
+        }),
+      ],
+    });
+    await parent.run('Use only existing evidence to answer');
+    expect(requests).toBe(1);
+    expect(actions).toBe(0);
+  } finally {
+    f.stop();
+  }
+});
 const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
 async function until(check: () => boolean) {
   for (let i = 0; i < 200; i++) {
@@ -75,6 +249,9 @@ function objective(body: Body): string {
 it('validates trimmed bounded input, duplicate IDs and unsupported fields', () => {
   const schema = delegationInputSchema();
   expect(schema.parse({ tasks: [{ ...task(' a '), objective: ' x ' }] }).tasks[0]?.id).toBe('a');
+  expect(
+    schema.parse({ tasks: [{ ...task('a'), title: ' 公式カレンダーで対象の収集日を確認 ' }] }).tasks[0]?.title,
+  ).toBe('公式カレンダーで対象の収集日を確認');
   for (const value of [
     tasks(),
     tasks('x', ' x '),
@@ -85,6 +262,8 @@ it('validates trimmed bounded input, duplicate IDs and unsupported fields', () =
     { tasks: [{ ...task('a'), systemPrompt: 'elevate' }] },
     { tasks: [{ ...task('a'), expectedOutput: 'x'.repeat(1001) }] },
     { tasks: [{ ...task('a'), id: 'x'.repeat(41) }] },
+    { tasks: [{ ...task('a'), title: 'あ'.repeat(61) }] },
+    { tasks: [{ ...task('a'), title: ' ' }] },
   ]) {
     expect(() => schema.parse(value)).toThrow();
   }

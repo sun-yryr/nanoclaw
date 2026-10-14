@@ -740,6 +740,78 @@ describe('deliverSessionMessages — post-delivery hooks', () => {
   });
 });
 
+describe('deliverSessionMessages — persistent Cline progress', () => {
+  it('stamps the real session/group/instance, keeps mid-turn chat separate and preserves firstDelivery', async () => {
+    await seedAgentAndChannel();
+    await createMessagingGroup({
+      id: 'mg-d',
+      channel_type: 'discord',
+      platform_id: 'discord:200:300',
+      instance: 'discord',
+      name: 'progress',
+      is_group: 1,
+      unknown_sender_policy: 'strict',
+      created_at: now(),
+    });
+    const { session } = await resolveSession('ag-1', 'mg-d', null, 'shared');
+    const db = new Database(outboundDbPath('ag-1', session.id));
+    const insert = db.prepare(
+      'INSERT INTO messages_out (id,timestamp,kind,platform_id,channel_type,in_reply_to,content) VALUES (?,?,?,?,?,?,?)',
+    );
+    const snapshot = { version: 1, runId: 'test-run', revision: 1, state: 'running' };
+    insert.run(
+      'progress-1',
+      '2026-10-13T00:00:01.000Z',
+      'agent_progress',
+      'discord:200:300',
+      'discord',
+      'in',
+      JSON.stringify(snapshot),
+    );
+    insert.run(
+      'segment',
+      '2026-10-13T00:00:02.000Z',
+      'chat',
+      'discord:200:300',
+      'discord',
+      'in',
+      JSON.stringify({ text: 'segment' }),
+    );
+    insert.run(
+      'progress-2',
+      '2026-10-13T00:00:03.000Z',
+      'agent_progress',
+      'discord:200:300',
+      'discord',
+      'in',
+      JSON.stringify({ ...snapshot, revision: 2, state: 'completed' }),
+    );
+    db.close();
+    const calls: Array<{ kind: string; content: any; instance?: string }> = [];
+    const flags: boolean[] = [];
+    registerPostDeliveryHook((msg, _session, info) => {
+      if (msg.id === 'segment') flags.push(info.firstDelivery);
+    });
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, kind, content, _files, instance) {
+        calls.push({ kind, content: JSON.parse(content), instance });
+        return '900';
+      },
+    });
+    await deliverSessionMessages(session);
+    expect(calls.map((c) => c.kind)).toEqual(['agent_progress', 'chat', 'agent_progress']);
+    expect(calls[0]!.content.route).toEqual({
+      sessionId: session.id,
+      agentGroupId: 'ag-1',
+      messagingGroupId: 'mg-d',
+      inReplyTo: 'in',
+    });
+    expect(calls[0]!.instance).toBe('discord');
+    expect(calls[2]!.content.snapshot.runId).toBe('test-run');
+    expect(flags).toEqual([true]);
+  });
+});
+
 describe('deliverSessionMessages — turn_status sticky edit', () => {
   beforeEach(async () => {
     const { resetStickyTurnStatus } = await import('./modules/turn-status/sticky.js');

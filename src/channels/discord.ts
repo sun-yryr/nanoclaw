@@ -5,6 +5,7 @@
 import { createDiscordAdapter } from '@chat-adapter/discord';
 
 import { readEnvFile } from '../env.js';
+import { DiscordProgress } from '../agent-progress/discord.js';
 import type { ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge, type ReplyContext } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
@@ -85,6 +86,11 @@ registerChannelAdapter('discord', {
     unwrapForwards(discordAdapter);
     return createChatSdkBridge({
       adapter: discordAdapter,
+      progress: new DiscordProgress({
+        botToken: env.DISCORD_BOT_TOKEN,
+        applicationId: env.DISCORD_APPLICATION_ID,
+        instance: 'discord',
+      }),
       concurrency: 'concurrent',
       botToken: env.DISCORD_BOT_TOKEN,
       extractReplyContext,

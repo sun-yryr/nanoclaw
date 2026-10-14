@@ -17,6 +17,7 @@ import {
   trimClineSnapshotToHistoryBudget,
 } from './cline-sessions.js';
 import { buildClineDelegateTasksTool, type ClineDelegateTasksTool } from './cline-delegation.js';
+import { FinalResponseGate } from './cline-final-response.js';
 import { clineSpawnSystemPromptHint, resolveClineSpawnConfig } from './cline-spawn.js';
 import {
   formatClineAuthFailureNotice,
@@ -346,18 +347,13 @@ export class ClineProvider implements AgentProvider {
     log(`ENV: CLINE_REASONING_EFFORT=${process.env.CLINE_REASONING_EFFORT ?? '(unset)'}`);
     log(`ENV: CLINE_SPAWN_MODEL=${process.env.CLINE_SPAWN_MODEL ?? '(unset→spawn off)'}`);
     log(`ENV: CLINE_SPAWN_API=${process.env.CLINE_SPAWN_API ?? '(unset→chat)'}`);
-    log(
-      `ENV: CLINE_SPAWN_BASE_URL=${process.env.CLINE_SPAWN_BASE_URL ?? '(unset→parent CLINE_BASE_URL)'}`,
-    );
+    log(`ENV: CLINE_SPAWN_BASE_URL=${process.env.CLINE_SPAWN_BASE_URL ?? '(unset→parent CLINE_BASE_URL)'}`);
     log(`ENV: CLINE_SPAWN_AUTH_MODE=${process.env.CLINE_SPAWN_AUTH_MODE ?? '(unset→default)'}`);
 
     const authMode = resolveClineAuthMode(process.env.CLINE_AUTH_MODE);
-    const reasoningEffort = resolveClineReasoningEffort(
-      process.env.CLINE_REASONING_EFFORT,
-      this.effort,
-    );
+    const reasoningEffort = resolveClineReasoningEffort(process.env.CLINE_REASONING_EFFORT, this.effort);
 
-    const pending: Array<{ text: string; userContent?: UserContentPart[] }> = [];
+    const pending: Array<{ text: string; userContent?: UserContentPart[]; finalOnly?: boolean }> = [];
     let waiting: (() => void) | null = null;
     let ended = false;
     let aborted = false;
@@ -384,9 +380,7 @@ export class ClineProvider implements AgentProvider {
         // stable x-opencode-session header (required since 2026-09-05).
         // See https://github.com/vercel/ai/issues/20271
         let sessionId =
-          input.continuation && isOpaqueSessionId(input.continuation)
-            ? input.continuation
-            : crypto.randomUUID();
+          input.continuation && isOpaqueSessionId(input.continuation) ? input.continuation : crypto.randomUUID();
         let snapshotToRestore: ReturnType<typeof loadSessionSnapshot> | null = null;
 
         if (input.continuation && isOpaqueSessionId(input.continuation)) {
@@ -464,9 +458,13 @@ export class ClineProvider implements AgentProvider {
             extraChildTools: [memoryReadTool, memoryWriteTool, ...mcpTools],
             useMcpDeferral: spawnAuthMode !== 'siwc',
             parentSignal: queryAbort.signal,
+            onProgress: (event) => {
+              events.push({ type: 'delegation', event });
+              eventWaiting?.();
+            },
             log,
           });
-          tools = [...hostTools, delegation];
+          tools = [...hostTools, delegation, delegation.resumeTool];
           log(
             `spawn-parent tools: ${tools.map((t) => t.name).join(', ')} ` +
               `(child model=${spawnConfig.modelId} @ ${spawnConfig.baseUrl}; MCP×${mcpTools.length} on child only)`,
@@ -479,9 +477,7 @@ export class ClineProvider implements AgentProvider {
             // activates them; execute handlers remain registered on the Agent.
             deferral = new McpToolDeferral(tools);
             tools = deferral.allRegisteredTools();
-            log(
-              `Loaded ${builtinTools.length} Cline built-in tools: ${builtinTools.map((t) => t.name).join(', ')}`,
-            );
+            log(`Loaded ${builtinTools.length} Cline built-in tools: ${builtinTools.map((t) => t.name).join(', ')}`);
             log(
               `MCP deferral: ${deferral.alwaysLoad.length} always-load, ` +
                 `${deferral.deferred.length} deferred, tool_search enabled`,
@@ -508,9 +504,10 @@ export class ClineProvider implements AgentProvider {
         }
 
         const modelIoHooks = createModelIoHooks({ providerId, modelId, sessionId });
-        const hooks = deferral
-          ? composeDeferralAndModelIoHooks(deferral, modelIoHooks)
-          : modelIoHooks;
+        const baseHooks = deferral ? composeDeferralAndModelIoHooks(deferral, modelIoHooks) : modelIoHooks;
+        const finalGate = new FinalResponseGate();
+        let finalResponseTimedOut = false;
+        const hooks = finalGate.hooks(baseHooks, modelIoHooks);
 
         const agent = new Agent({
           providerId,
@@ -585,16 +582,19 @@ export class ClineProvider implements AgentProvider {
               break;
             case 'run-finished': {
               const result = (event as any).result;
-              providerEvent = { type: 'result', text: result?.outputText ?? null };
+              providerEvent =
+                result?.status && result.status !== 'completed'
+                  ? { type: 'activity' }
+                  : { type: 'result', text: result?.outputText ?? null };
               break;
             }
             case 'run-failed': {
               const error = (event as any).error;
               const described = describeError(error, 'Run failed');
               log(`run-failed error detail: ${described.detail}`);
-              // Terminal: use the result door so Discord gets the message
-              // (poll-loop only notices result.isError, not type:error).
-              providerEvent = terminalFailureResult(described, authMode);
+              // Report errors once through the settled run/continue result.
+              // Never emit an empty success before that failure notification.
+              providerEvent = { type: 'activity' };
               break;
             }
             case 'status-notice': {
@@ -710,6 +710,14 @@ export class ClineProvider implements AgentProvider {
             let continueDone = false;
             let continueResult: Awaited<ReturnType<typeof agent.continue>> | undefined;
             delegation?.resetTurn();
+            finalGate.begin(followUp.finalOnly === true);
+            finalResponseTimedOut = false;
+            const finalTimer = followUp.finalOnly
+              ? setTimeout(() => {
+                  finalResponseTimedOut = true;
+                  agent.abort(new Error('Final answer recovery timed out after 90 seconds.'));
+                }, 90000)
+              : undefined;
             const continuePromise = agent
               .continue(toAgentInput(followUp.text, followUp.userContent) as Parameters<typeof agent.continue>[0])
               .then((r: AgentRunResult) => {
@@ -719,12 +727,16 @@ export class ClineProvider implements AgentProvider {
                 return r;
               })
               .catch((err: unknown) => {
-                const described = describeError(err, 'Continue failed');
+                const described = describeError(
+                  finalResponseTimedOut ? new Error('Final answer recovery timed out after 90 seconds.') : err,
+                  'Continue failed',
+                );
                 log(`agent.continue rejected: ${described.detail}`);
                 events.push(terminalFailureResult(described, authMode));
                 continueDone = true;
                 eventWaiting?.();
-              });
+              })
+              .finally(() => clearTimeout(finalTimer));
             void continuePromise;
 
             while (!continueDone) {
@@ -743,7 +755,12 @@ export class ClineProvider implements AgentProvider {
 
             if (continueResult) {
               if (continueResult.status !== 'completed') {
-                const described = describeError(continueResult.error, 'Continue failed');
+                const described = describeError(
+                  finalResponseTimedOut
+                    ? new Error('Final answer recovery timed out after 90 seconds.')
+                    : continueResult.error,
+                  'Continue failed',
+                );
                 log(`agent.continue non-completed status=${continueResult.status}: ${described.detail}`);
                 yield terminalFailureResult(described, authMode);
                 if (isClineAuthFailureMessage(described.message)) return;
@@ -770,6 +787,10 @@ export class ClineProvider implements AgentProvider {
     }
 
     return {
+      requestFinalResponse: (prompt: string) => {
+        pending.push({ text: prompt, finalOnly: true });
+        kick();
+      },
       push: (message: string, userContent?: UserContentPart[]) => {
         log(`push() called: ${message.substring(0, 100)}...`);
         pending.push({ text: message, userContent });

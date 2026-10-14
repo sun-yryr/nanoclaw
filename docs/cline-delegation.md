@@ -2,7 +2,7 @@
 
 This fork's Cline provider uses `delegate_tasks` when `CLINE_SPAWN_MODEL` resolves
 to an enabled child configuration. The parent keeps `ask_question` and
-`submit_and_exit`; its execution tool is `delegate_tasks`. Without a spawn model,
+`submit_and_exit`; its execution tools are `delegate_tasks` and `resume_delegated_task`. Without a spawn model,
 the existing Cline tool configuration remains in use.
 
 Each batch accepts 1–4 independent tasks with a unique `id`, an `objective`,
@@ -12,12 +12,65 @@ rejected. Limits are 40/1500/3000/1000 characters respectively. The harness supp
 one fixed worker prompt. Dependencies belong in a subsequent batch after the
 parent reviews the previous results.
 
+An optional `title` lets the parent describe each task's action and general target
+in up to 60 characters for the progress card (for example,
+「公式カレンダーで対象の収集日を確認」). It is separate from the objective,
+without another model call or automatic summarization. The parent must exclude
+private data, names, email subjects/bodies, URLs, paths, credentials and mentions.
+The harness, poster and host validate length and unsafe patterns, falling back
+to 「タスク N」 for missing or unsafe titles. These checks supplement the prompt;
+they do not detect every possible piece of personal information.
+
 Results preserve input order and report `completed`, `partial`, `failed`, or
 `cancelled`, elapsed milliseconds (including queue time), and available text,
 iterations, and token usage. SDK `completed` maps to completed, `aborted` to
 cancelled, and other finish reasons to partial. Exceptions map to failed; error
 text is intentionally generic to avoid exposing request or credential data.
 A child failure does not discard its siblings. No harness retries occur.
+
+## Bounded recovery after the iteration ceiling
+
+When a worker reaches `CLINE_SPAWN_MAX_ITERATIONS`, its result stays `partial`
+and identifies `finishReason: max_iterations`. SDK 0.0.47 sometimes reports this
+as legacy `error`; only the exact SDK diagnostic and matching iteration count
+are normalized. Authentication, arbitrary errors and cancellation are not
+treated as resumable iteration ceilings.
+
+If history fits a 2 MB bound and the turn has attempt budget left, the result
+contains `recovery: { id, reason: "max_iterations", remainingResumes: 1 }`.
+The parent decides whether to call `resume_delegated_task` with `recoveryId` and
+a bounded `instruction`, or report the incomplete work. Nothing automatically
+retries a worker. Resumption restores its original task history, endpoint,
+session header and activated MCP schemas, with fresh cancellation and tool-lock
+wrappers. The worker must verify existing effects before attempting uncertain
+writes. This preserves evidence rather than replaying the objective from scratch;
+it does not make model-selected writes inherently idempotent.
+
+Each worker can resume once, and that attempt consumes one of the same eight
+turn slots. With the default iteration ceiling a worker can use at most 25 + 25
+iterations. Recovery IDs are scoped to the parent instance and current SDK user
+turn, consumed atomically, and expire on `resetTurn()`. They are in-memory only:
+container restart or a later user turn cannot resume an old ID. No worker history
+or recovery ID is included in a Discord progress card. Resumption updates the
+existing task/batch entry and includes elapsed time from both attempts.
+
+## Empty parent answers
+
+For Cline chat turns with no final text and no already queued/delivered chat
+reply, the poll-loop requests one final response from the retained parent
+history. The original request and reply route are preserved across the correction.
+`requestFinalResponse()` makes one model request, advertises no tools and blocks
+all tool execution through `beforeTool`; a 90-second deadline aborts a stalled
+request. It cannot resume a worker or replay an action. Normal later user turns
+restore the normal tools.
+
+If the correction is empty, still unwrapped, fails, or times out, a safe failure
+notice goes through the normal reply route and the progress run ends failed.
+Providers missing the constrained recovery API fail closed instead of using
+ordinary `push()` to restart execution. Existing MCP/mid-turn replies are not
+duplicated. Task runs, failure-notice wakes and other providers retain their
+existing behavior. Failed/aborted SDK runs are reported once from the settled
+run result rather than first being emitted as empty successes.
 
 ## Bounds
 
@@ -120,3 +173,15 @@ Cline mode. No database or session-schema migration is required.
 The next stage (PR2 in the design) is trusted research/action tool policy and
 structured telemetry/evaluation. This implementation does not introduce those
 policies, a task DB, nested delegation, or changes to other providers.
+
+Recovery validation on 2026-10-14: runner-wide `bun test --isolate` passed
+680 tests with 3 existing skips and no failures. The four recovery-focused files
+passed 28 tests both locally and in the actual group image with networking
+disabled. Tests cover the real SDK's iteration-limit classification, preserved
+MCP activation/history/session, a successful action not replayed by restarting
+the worker, recovery ownership/budget/expiry, tool-free parent correction,
+normal-tool restoration on a later turn, single failure notification, empty or
+unwrapped recovery failure, duplicate-reply avoidance and unchanged other providers.
+Host/runner typechecks and host build passed; the deployed service and CLI were
+healthy after restart. No Discord trial messages or historical user actions were
+replayed during verification. Changes remain uncommitted on `main`.

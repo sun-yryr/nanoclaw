@@ -152,6 +152,8 @@ export type McpServerConfig =
   | { type: 'http'; url: string; headers?: Record<string, string> };
 
 export interface AgentQuery {
+  /** Optional bounded, tool-free recovery using the active query's retained history. */
+  requestFinalResponse?(prompt: string): void;
   /** Push a follow-up message into the active query. */
   push(message: string, userContent?: UserContentPart[]): void;
 
@@ -188,6 +190,7 @@ export type ProviderEvent =
   | { type: 'text'; text: string }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
+  | { type: 'delegation'; event: import('../agent-progress/model.generated.js').DelegationProgress }
   | { type: 'file'; path: string }
   /**
    * Liveness signal. Providers MUST yield this on every underlying SDK

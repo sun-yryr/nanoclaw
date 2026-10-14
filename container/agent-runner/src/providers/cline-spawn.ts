@@ -10,6 +10,8 @@ import crypto from 'crypto';
 import {
   createDelegatedAgentConfigProvider,
   createSpawnAgentTool,
+  createDelegatedAgent,
+  type AgentResult,
   type AgentHooks,
   type AgentTool,
   type AgentToolContext,
@@ -23,7 +25,7 @@ import { McpToolDeferral } from './cline-mcp-deferral.js';
 type BeforeModelContext = Parameters<NonNullable<AgentHooks['beforeModel']>>[0];
 type BeforeToolContext = Parameters<NonNullable<AgentHooks['beforeTool']>>[0];
 
-const CHILD_EXCLUDED_TOOLS = new Set(['ask_question', 'spawn_agent', 'delegate_tasks']);
+const CHILD_EXCLUDED_TOOLS = new Set(['ask_question', 'spawn_agent', 'delegate_tasks', 'resume_delegated_task']);
 
 /** Per-execute OpenCode Go session header — avoids races on parallel spawn_agent. */
 const childSessionStore = new AsyncLocalStorage<string>();
@@ -90,9 +92,7 @@ export function resolveClineSpawnConfig(input: ResolveClineSpawnConfigInput): Cl
 
   if (spawnAuthMode === 'siwc') {
     const maxIterations =
-      typeof input.maxIterations === 'number' && input.maxIterations > 0
-        ? Math.floor(input.maxIterations)
-        : 25;
+      typeof input.maxIterations === 'number' && input.maxIterations > 0 ? Math.floor(input.maxIterations) : 25;
     return {
       modelId,
       providerId: 'openai-native',
@@ -108,13 +108,10 @@ export function resolveClineSpawnConfig(input: ResolveClineSpawnConfigInput): Cl
     if (isApiOpenAiBaseUrl(spawnBaseUrl)) return null;
   }
 
-  const baseUrl =
-    spawnBaseUrl || parentBaseUrl || 'https://opencode.ai/zen/go/v1';
+  const baseUrl = spawnBaseUrl || parentBaseUrl || 'https://opencode.ai/zen/go/v1';
   const apiKey = input.apiKey?.trim() || 'placeholder';
   const maxIterations =
-    typeof input.maxIterations === 'number' && input.maxIterations > 0
-      ? Math.floor(input.maxIterations)
-      : 25;
+    typeof input.maxIterations === 'number' && input.maxIterations > 0 ? Math.floor(input.maxIterations) : 25;
 
   return {
     modelId,
@@ -165,11 +162,46 @@ export interface BuildClineSpawnAgentToolOptions {
  * Parent-only spawn_agent tool. Children do not receive this tool (no nesting).
  * Each spawn gets a fresh MCP deferral so external MCP schemas stay progressive.
  */
-export function buildClineSpawnAgentTool(options: BuildClineSpawnAgentToolOptions): AgentTool {
+export interface ClineSpawnAgentTool extends AgentTool {
+  execute(input: { systemPrompt: string; task: string }, context: AgentToolContext): Promise<unknown>;
+  canResume(): boolean;
+  resume(
+    instruction: string,
+    context: AgentToolContext,
+    wrap: (tool: AgentTool) => AgentTool,
+  ): Promise<{
+    text: string;
+    finishReason: AgentResult['finishReason'];
+    iterations: number;
+    usage: { inputTokens: number; outputTokens: number };
+  }>;
+}
+export function buildClineSpawnAgentTool(options: BuildClineSpawnAgentToolOptions): ClineSpawnAgentTool {
   const { spawn, cwd, extraChildTools = [], useMcpDeferral = true, log = () => {} } = options;
 
   // SDK 0.0.47 ignores SpawnAgentToolConfig.hooks; runtime config forwards them.
   let childDeferral: McpToolDeferral | null = null;
+  let checkpoint: { messages: AgentResult['messages']; sessionId: string; activated: string[]; prompt: string } | null =
+    null;
+  // SDK 0.0.47's legacy adapter maps the modern iteration ceiling to "error".
+  // Recognize only its exact diagnostic plus the actual iteration count.
+  const iterationLimit = (result: { finishReason: string; text: string; iterations: number }) =>
+    result.finishReason === 'max_iterations' ||
+    (result.finishReason === 'error' &&
+      result.iterations >= spawn.maxIterations &&
+      result.text === `Agent runtime exceeded maxIterations (${spawn.maxIterations})`);
+  const capture = (result: AgentResult, prompt: string): void => {
+    checkpoint = null;
+    if (!iterationLimit(result)) return;
+    // Bound retained history; oversized transcripts are partial but not resumable.
+    if (Buffer.byteLength(JSON.stringify(result.messages), 'utf8') > 2_000_000) return;
+    checkpoint = {
+      messages: result.messages,
+      sessionId: childSessionStore.getStore()!,
+      activated: [...(childDeferral?.activatedNames ?? [])],
+      prompt,
+    };
+  };
   const configProvider = createDelegatedAgentConfigProvider({
     providerId: spawn.providerId,
     modelId: spawn.modelId,
@@ -219,11 +251,11 @@ export function buildClineSpawnAgentTool(options: BuildClineSpawnAgentToolOption
     hookErrorMode: 'throw',
     onSubAgentStart: (ctx: SubAgentStartContext) => {
       log(
-        `spawn_agent start subAgentId=${ctx.subAgentId} model=${spawn.modelId} ` +
-          `taskChars=${ctx.input.task.length}`,
+        `spawn_agent start subAgentId=${ctx.subAgentId} model=${spawn.modelId} ` + `taskChars=${ctx.input.task.length}`,
       );
     },
     onSubAgentEnd: (ctx: SubAgentEndContext) => {
+      if (ctx.agentResult) capture(ctx.agentResult, ctx.input.systemPrompt);
       if (ctx.error) {
         log(`spawn_agent end subAgentId=${ctx.subAgentId} error=${ctx.error.name}`);
         return;
@@ -237,9 +269,45 @@ export function buildClineSpawnAgentTool(options: BuildClineSpawnAgentToolOption
 
   return {
     ...inner,
+    canResume: () => checkpoint !== null,
+    async resume(instruction, context, wrap) {
+      const saved = checkpoint;
+      if (!saved) throw new Error('Worker has no resumable iteration-limit checkpoint');
+      checkpoint = null;
+      return childSessionStore.run(saved.sessionId, async () => {
+        const base = buildSpawnChildTools(cwd, extraChildTools).map(wrap);
+        childDeferral = useMcpDeferral ? new McpToolDeferral(base) : null;
+        childDeferral?.activate(saved.activated);
+        const agent = createDelegatedAgent({
+          kind: 'subagent',
+          prompt: saved.prompt,
+          configProvider,
+          tools: childDeferral?.allRegisteredTools() ?? base,
+          maxIterations: spawn.maxIterations,
+          parentAgentId: context.agentId,
+          abortSignal: context.signal,
+          hookErrorMode: 'throw',
+        });
+        agent.restore(saved.messages);
+        const result = await agent.continue(
+          'Continue the original bounded objective from the retained history. Do not repeat successful side effects. ' +
+            'Read back existing state before any uncertain write. Report completed work, remaining work, and uncertainty. ' +
+            instruction,
+        );
+        return {
+          text: result.text,
+          finishReason: iterationLimit(result) ? 'max_iterations' : result.finishReason,
+          iterations: result.iterations,
+          usage: { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens },
+        };
+      });
+    },
     execute: async (input: { systemPrompt: string; task: string }, context: AgentToolContext) => {
       const childSessionId = crypto.randomUUID();
-      return childSessionStore.run(childSessionId, () => inner.execute(input, context));
+      return childSessionStore.run(childSessionId, async () => {
+        const result = await inner.execute(input, context);
+        return iterationLimit(result) ? { ...result, finishReason: 'max_iterations' } : result;
+      });
     },
   };
 }
@@ -248,12 +316,14 @@ export function buildClineSpawnAgentTool(options: BuildClineSpawnAgentToolOption
 export function clineSpawnSystemPromptHint(modelId: string): string {
   return [
     '## Delegation (delegate_tasks) — REQUIRED for ALL tool use',
-    `You have only delegate_tasks, ask_question, and submit_and_exit. Workers use ${modelId} with file/shell/web/edit/skills/memory/MCP (including send_message).`,
-    'You own interpretation, synthesis, final decisions, and the user-facing response. Your only execution tool is delegate_tasks.',
+    `You have only delegate_tasks, resume_delegated_task, ask_question, and submit_and_exit. Workers use ${modelId} with file/shell/web/edit/skills/memory/MCP (including send_message).`,
+    'You own interpretation, synthesis, final decisions, and the user-facing response. Execute through delegate_tasks or explicitly resume an existing worker.',
     'Decompose independent lookups into bounded objective-driven tasks in one batch. Do not pass the entire user request to one worker or split work into trivial one-tool steps.',
     'For a simple bounded operation, delegate one task. Use another batch only for work depending on previous results or missing results.',
     'Keep context minimal; specify expectedOutput. Workers cannot ask the user or delegate further.',
+    'Give each delegate_tasks task a specific plain-language public title up to 60 characters describing the action and general target, e.g. 公式カレンダーで対象の収集日を確認 or 現在の通知設定と収集日を照合. Do not use generic category labels. Keep titles separate from objectives: no private data, personal names, email subjects/bodies, URLs, file paths, credentials, mentions, or copied objective/context/tool input/output. Omit title if you cannot describe the task safely; a numbered default will be shown.',
     'Review partial, failed, and cancelled results before concluding. Never invent success or retry side effects blindly.',
+    'A max_iterations result may provide recovery.id. Decide whether the original objective needs more work, then call resume_delegated_task with that ID and a bounded instruction. History is preserved; never restart uncertain side effects from scratch. Each worker can resume once within the turn budget. Otherwise report the incomplete work to the user. Always produce a final response, including when no worker completed.',
     'Respect external action permissions and approval requirements. Avoid conflicting writes and keep final integration and judgement yourself.',
   ].join('\n');
 }

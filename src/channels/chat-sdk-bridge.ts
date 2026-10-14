@@ -5,6 +5,7 @@
  * Used by Discord, Slack, and other Chat SDK-supported platforms.
  */
 import { createHash, timingSafeEqual } from 'crypto';
+import type { ProgressTransport } from '../agent-progress/discord.js';
 import http from 'http';
 
 import {
@@ -326,6 +327,8 @@ export function registerBridgeInboundPolicy(channelType: string, wrap: BridgeInb
 }
 
 export interface ChatSdkBridgeConfig {
+  /** Optional persistent Discord Components V2 transport; other adapters omit it. */
+  progress?: ProgressTransport;
   adapter: Adapter;
   /**
    * Adapter-instance name for running multiple bridges of one platform
@@ -750,6 +753,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       });
 
       await chat.initialize();
+      await config.progress?.start();
 
       // Test seam: unit tests drive the SDK's public process* dispatchers
       // (processAssistantContextChanged, …) against the handlers registered
@@ -763,7 +767,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         gatewayAbort = new AbortController();
 
         // Start local HTTP server to receive forwarded Gateway events (including interactions)
-        const webhookUrl = await startLocalWebhookServer(gatewayAdapter, setupConfig, config.botToken);
+        const webhookUrl = await startLocalWebhookServer(gatewayAdapter, setupConfig, config.botToken, config.progress);
 
         // Exponential backoff capped at 1h. Without this, an unrecoverable
         // failure (e.g., TokenInvalid) restarts ~10×/sec and Discord's
@@ -837,6 +841,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // "discord:guildId:channelId") — use it directly as the thread ID
       const tid = threadId ?? platformId;
       const content = message.content as Record<string, unknown>;
+      if (message.kind === 'agent_progress' && config.progress) {
+        return config.progress.deliver(platformId, threadId, content);
+      }
 
       if (content.operation === 'edit' && content.messageId) {
         const msgId = content.messageId as string;
@@ -1021,6 +1028,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     },
 
     async teardown() {
+      await config.progress?.stop();
       gatewayAbort?.abort();
       await chat.shutdown();
       log.info('Chat SDK bridge shut down', { adapter: adapter.name });
@@ -1074,6 +1082,7 @@ function startLocalWebhookServer(
   adapter: GatewayAdapter,
   setupConfig: ChannelSetup,
   botToken?: string,
+  progress?: ProgressTransport,
 ): Promise<string> {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
@@ -1086,7 +1095,7 @@ function startLocalWebhookServer(
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
         const body = Buffer.concat(chunks).toString();
-        handleForwardedEvent(body, adapter, setupConfig, botToken)
+        handleForwardedEvent(body, adapter, setupConfig, botToken, progress)
           .then(() => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end('{"ok":true}');
@@ -1115,11 +1124,12 @@ function gatewayTokenMatches(header: string | string[] | undefined, botToken: st
   return timingSafeEqual(digest(header), digest(botToken));
 }
 
-async function handleForwardedEvent(
+export async function handleForwardedEvent(
   body: string,
   adapter: GatewayAdapter,
   setupConfig: ChannelSetup,
   botToken?: string,
+  progress?: ProgressTransport,
 ): Promise<void> {
   let event: { type: string; data: Record<string, unknown> };
   try {
@@ -1134,6 +1144,12 @@ async function handleForwardedEvent(
     // type 3 = MessageComponent (button/select)
     if (interaction.type === 3) {
       const customId = (interaction.data as Record<string, unknown>)?.custom_id as string;
+      if (customId?.startsWith('ncp:')) {
+        await progress?.interaction(interaction);
+        return;
+      }
+      // Unknown component prefixes must never receive legacy embeds or lose buttons.
+      if (!customId?.startsWith('ncq:')) return;
       // In guilds the clicker is at interaction.member.user; in DMs it's interaction.user directly.
       const user =
         ((interaction.member as Record<string, unknown>)?.user as Record<string, string> | undefined) ??
