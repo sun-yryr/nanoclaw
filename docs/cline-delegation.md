@@ -21,12 +21,61 @@ The harness, poster and host validate length and unsafe patterns, falling back
 to 「タスク N」 for missing or unsafe titles. These checks supplement the prompt;
 they do not detect every possible piece of personal information.
 
-Results preserve input order and report `completed`, `partial`, `failed`, or
+Results preserve input order and report execution `completed`, `partial`, `failed`, or
 `cancelled`, elapsed milliseconds (including queue time), and available text,
 iterations, and token usage. SDK `completed` maps to completed, `aborted` to
 cancelled, and other finish reasons to partial. Exceptions map to failed; error
 text is intentionally generic to avoid exposing request or credential data.
 A child failure does not discard its siblings. No harness retries occur.
+
+## Completion review and recovery
+
+Execution status is separate from objective completion. Every worker receives
+`report_task_result`, with `status` (`completed`, `partial`, `blocked`), observed
+`evidence`, and `remainingWork`. A completed claim cannot contain outstanding
+work; a partial/blocked claim must describe the gap. Missing reports produce
+`completion.status: unverified`. Operations after a report invalidate it, except
+terminal `submit_and_exit`. Progress cards show incomplete/unverified claims as
+partial even when SDK execution ended normally. These are model claims for
+parent review, not trusted proof of external state.
+
+For exhaustive tasks, the parent sets `requireCoverage: true`. The worker reports
+`coverage: { listedIds, reviewedIds, classifiedIds, paginationComplete }`; the
+harness deduplicates and compares these sets, returning counts, missing IDs and
+unexpected IDs (up to 50 each, with full counts). Previously enumerated IDs
+remain required across reports and follow-ups, so shrinking the declared set
+cannot hide an omission. A completed claim becomes partial if coverage is absent, pages
+remain, or the sets differ. Each list is bounded to 5,000 IDs. The model must
+still obtain the real pages and verify the requested time window; matching
+self-reported sets cannot prove that retrieval was exhaustive.
+
+Each result includes a turn-local `taskRef`. A follow-up supplies `followUpTo`
+referencing an earlier result and includes prior evidence/checkpoints in context.
+It must finish that task's remaining work, and automatically inherits its coverage
+requirement. A completed follow-up closes its incomplete ancestors; completed
+siblings are left alone. Recovery IDs continue to handle iteration ceilings;
+timeouts without retained history use a narrow follow-up rather than a blind
+replay. Workers are instructed to checkpoint long reviews in their workspace.
+Partial reports also retain their last evidence in memory when a later call
+times out, even though subsequent operations invalidate their completion claim.
+
+If the parent tries to end with unresolved delegated work, the provider withholds
+that provisional answer and continues the same parent history with the gaps and
+remaining attempt budget. At most two completion reviews run per user turn.
+No worker is automatically re-executed, and reviews do not reset the eight-attempt
+budget. Explicit external blockers, parent cancellation and failed parent runs
+do not initiate this correction. Tool-free empty-answer recovery remains tool-free.
+Only the settled final result is published to the poll-loop, so a provisional
+disclaimer cannot prematurely complete the task run or trigger its delivery nudge.
+
+The parent owns checking the reports, recovering authorized missing work and
+explaining concrete blockers or exhausted limits. This does not guarantee all
+model errors are detected or all tasks can finish within the bounds. Explicit
+mid-turn messages/actions remain governed by the existing approval and delivery
+paths, and are never rolled back by final-answer review.
+
+See [the investigation and validation notes](secretary-completion-recovery.md)
+for the 2026-10-19 incident that motivated this change.
 
 ## Bounded recovery after the iteration ceiling
 
@@ -38,8 +87,9 @@ treated as resumable iteration ceilings.
 
 If history fits a 2 MB bound and the turn has attempt budget left, the result
 contains `recovery: { id, reason: "max_iterations", remainingResumes: 1 }`.
-The parent decides whether to call `resume_delegated_task` with `recoveryId` and
-a bounded `instruction`, or report the incomplete work. Nothing automatically
+The parent should call `resume_delegated_task` with `recoveryId` and
+a bounded `instruction` when authorized required work remains, or explain a
+concrete blocker/exhausted budget. Nothing automatically
 retries a worker. Resumption restores its original task history, endpoint,
 session header and activated MCP schemas, with fresh cancellation and tool-lock
 wrappers. The worker must verify existing effects before attempting uncertain
@@ -74,11 +124,11 @@ run result rather than first being emitted as empty successes.
 
 ## Bounds
 
-| Environment variable | Default | Accepted range |
-| --- | --- | --- |
-| `CLINE_DELEGATION_MAX_CONCURRENCY` | 3 | 1–3 |
-| `CLINE_DELEGATION_MAX_TASKS_PER_BATCH` | 4 | 1–4 |
-| `CLINE_DELEGATION_MAX_TASKS_PER_TURN` | 8 | 1–8 |
+| Environment variable                   | Default | Accepted range |
+| -------------------------------------- | ------- | -------------- |
+| `CLINE_DELEGATION_MAX_CONCURRENCY`     | 3       | 1–3            |
+| `CLINE_DELEGATION_MAX_TASKS_PER_BATCH` | 4       | 1–4            |
+| `CLINE_DELEGATION_MAX_TASKS_PER_TURN`  | 8       | 1–8            |
 
 These are conservative v1 ceilings; overrides can lower them. Invalid or empty
 values fail at tool construction. Concurrent batches reserve the turn budget
@@ -184,4 +234,4 @@ normal-tool restoration on a later turn, single failure notification, empty or
 unwrapped recovery failure, duplicate-reply avoidance and unchanged other providers.
 Host/runner typechecks and host build passed; the deployed service and CLI were
 healthy after restart. No Discord trial messages or historical user actions were
-replayed during verification. Changes remain uncommitted on `main`.
+replayed during verification.

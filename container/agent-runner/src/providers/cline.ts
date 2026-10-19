@@ -17,6 +17,7 @@ import {
   trimClineSnapshotToHistoryBudget,
 } from './cline-sessions.js';
 import { buildClineDelegateTasksTool, type ClineDelegateTasksTool } from './cline-delegation.js';
+import { recoverIncompleteTurn } from './cline-task-completion.js';
 import { FinalResponseGate } from './cline-final-response.js';
 import { clineSpawnSystemPromptHint, resolveClineSpawnConfig } from './cline-spawn.js';
 import {
@@ -581,11 +582,9 @@ export class ClineProvider implements AgentProvider {
               providerEvent = { type: 'activity' };
               break;
             case 'run-finished': {
-              const result = (event as any).result;
-              providerEvent =
-                result?.status && result.status !== 'completed'
-                  ? { type: 'activity' }
-                  : { type: 'result', text: result?.outputText ?? null };
+              // Only the settled turn below may publish a final result. A completed
+              // SDK run can still need parent review and delegated recovery.
+              providerEvent = { type: 'activity' };
               break;
             }
             case 'run-failed': {
@@ -630,10 +629,14 @@ export class ClineProvider implements AgentProvider {
           );
         }
         delegation?.resetTurn();
-        const runPromise = agent
+        const runPromise = recoverIncompleteTurn(
           // Cline accepts string | AgentMessage; multimodal uses a user-role
           // content array (may include video_url passthrough beyond AgentMessagePart).
-          .run(firstInput as Parameters<typeof agent.run>[0])
+          () => agent.run(firstInput as Parameters<typeof agent.run>[0]),
+          (prompt) => agent.continue(prompt),
+          () => delegation?.recoveryPrompt(),
+          queryAbort.signal,
+        )
           .then((r: AgentRunResult) => {
             runDone = true;
             runResult = r;
@@ -664,6 +667,7 @@ export class ClineProvider implements AgentProvider {
         }
 
         if (runResult) {
+          if (runResult.status === 'completed') yield { type: 'result', text: runResult.outputText ?? null };
           if (runResult.status !== 'completed') {
             const described = describeError(runResult.error, 'Run failed');
             log(`agent.run non-completed status=${runResult.status}: ${described.detail}`);
@@ -718,8 +722,16 @@ export class ClineProvider implements AgentProvider {
                   agent.abort(new Error('Final answer recovery timed out after 90 seconds.'));
                 }, 90000)
               : undefined;
-            const continuePromise = agent
-              .continue(toAgentInput(followUp.text, followUp.userContent) as Parameters<typeof agent.continue>[0])
+            const continuePromise = recoverIncompleteTurn(
+              () =>
+                agent.continue(
+                  toAgentInput(followUp.text, followUp.userContent) as Parameters<typeof agent.continue>[0],
+                ),
+              (prompt) => agent.continue(prompt),
+              // Tool-free answer correction must never restart execution.
+              () => (followUp.finalOnly ? undefined : delegation?.recoveryPrompt()),
+              queryAbort.signal,
+            )
               .then((r: AgentRunResult) => {
                 continueDone = true;
                 continueResult = r;
@@ -754,6 +766,8 @@ export class ClineProvider implements AgentProvider {
             }
 
             if (continueResult) {
+              if (continueResult.status === 'completed')
+                yield { type: 'result', text: continueResult.outputText ?? null };
               if (continueResult.status !== 'completed') {
                 const described = describeError(
                   finalResponseTimedOut

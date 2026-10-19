@@ -12,6 +12,106 @@ import { FinalResponseGate } from './cline-final-response.js';
 const context: AgentToolContext = { agentId: 'parent', iteration: 1 };
 const task = (id: string) => ({ id, objective: id, expectedOutput: 'concise result' });
 
+it('treats SDK completion without evidence as unverified and retains timeout gaps for parent recovery', async () => {
+  const f = fixture(() => completion('12 read, count unknown'));
+  try {
+    const tool = buildClineDelegateTasksTool(f.options);
+    const output = (await tool.execute(tasks('review'), context)) as DelegateTasksOutput;
+    expect(output.results[0]?.status).toBe('completed'); // Execution, not objective completion.
+    expect(output.results[0]?.completion?.status).toBe('unverified');
+    expect(tool.recoveryPrompt()).toContain(output.results[0]!.taskRef);
+    tool.resetTurn();
+    expect(tool.recoveryPrompt()).toBeUndefined();
+  } finally {
+    f.stop();
+  }
+  const slow = fixture(async () => {
+    await new Promise((r) => setTimeout(r, 60));
+    return completion();
+  });
+  try {
+    const tool = buildClineDelegateTasksTool({ ...slow.options, childTimeoutMs: 10 });
+    const output = (await tool.execute(tasks('verify'), context)) as DelegateTasksOutput;
+    expect(output.results[0]?.status).toBe('cancelled');
+    expect(output.results[0]?.recovery).toBeUndefined();
+    expect(tool.recoveryPrompt()).toContain('verify');
+    expect(tool.recoveryPrompt()).toContain('Remaining child attempts in this turn: 7');
+  } finally {
+    slow.stop();
+  }
+});
+
+it('links verified follow-ups to incomplete work, leaves completed siblings alone and shares the attempt budget', async () => {
+  const calls = new Map<string, number>();
+  const f = fixture((body) => {
+    const id = objective(body),
+      n = calls.get(id) ?? 0;
+    calls.set(id, n + 1);
+    if (n === 0)
+      return completion('', [
+        {
+          name: 'report_task_result',
+          args: {
+            status: id === 'review' ? 'partial' : 'completed',
+            evidence:
+              id === 'review'
+                ? '12 messages read; page total unverified'
+                : '12 unique IDs enumerated = 12 read = 12 classified; no next page',
+            remainingWork: id === 'review' ? 'reconcile IDs and time boundaries' : '',
+          },
+        },
+      ]);
+    return completion('evidence');
+  });
+  try {
+    const tool = buildClineDelegateTasksTool({
+      ...f.options,
+      limits: { maxConcurrency: 3, maxTasksPerBatch: 4, maxTasksPerTurn: 3 },
+    });
+    const output = (await tool.execute(tasks('review', 'remember'), context)) as DelegateTasksOutput;
+    expect(output.results[0]?.completion?.status).toBe('partial');
+    expect(tool.recoveryPrompt()).toContain('reconcile IDs');
+    expect(tool.recoveryPrompt()).not.toContain('remember');
+    await tool.execute({ tasks: [{ ...task('verify'), followUpTo: output.results[0]!.taskRef }] }, context);
+    expect(tool.recoveryPrompt()).toBeUndefined();
+    expect(calls.get('remember')).toBe(2); // Exactly one worker, two model turns.
+    await expect(tool.execute(tasks('extra'), context)).rejects.toThrow(/budget/);
+    tool.resetTurn();
+    await expect(
+      tool.execute({ tasks: [{ ...task('stale'), followUpTo: output.results[0]!.taskRef }] }, context),
+    ).rejects.toThrow(/earlier task/);
+  } finally {
+    f.stop();
+  }
+});
+
+it('accepts a concrete external blocker without forcing blind recovery', async () => {
+  let requests = 0;
+  const f = fixture(() =>
+    requests++ === 0
+      ? completion('', [
+          {
+            name: 'report_task_result',
+            args: {
+              status: 'blocked',
+              evidence: 'Permission denied; no write attempted',
+              remainingWork: 'Operator must grant account access',
+            },
+          },
+        ])
+      : completion('blocked'),
+  );
+  try {
+    const tool = buildClineDelegateTasksTool(f.options);
+    const output = (await tool.execute(tasks('permission'), context)) as DelegateTasksOutput;
+    expect(output.results[0]?.completion?.status).toBe('blocked');
+    expect(tool.recoveryPrompt()).toBeUndefined();
+    expect(requests).toBe(2);
+  } finally {
+    f.stop();
+  }
+});
+
 it('requires explicit parent resumption after max_iterations, retains evidence and session, and never repeats a successful action', async () => {
   let requests = 0,
     writes = 0;
@@ -24,6 +124,17 @@ it('requires explicit parent resumption after max_iterations, retains evidence a
     expect(body.tools?.some((tool) => tool.function.name === 'mcp__external__write_once')).toBe(true);
     if (step === 1) return completion('', [{ name: 'mcp__external__write_once', args: {} }]);
     expect(JSON.stringify(body.messages)).toContain('APPLIED-ONCE');
+    if (step === 2)
+      return completion('', [
+        {
+          name: 'report_task_result',
+          args: {
+            status: 'completed',
+            evidence: 'Existing APPLIED-ONCE receipt verified; report finished',
+            remainingWork: '',
+          },
+        },
+      ]);
     return completion('Verified existing change; finished remaining reporting.');
   }, 2);
   try {
@@ -60,6 +171,7 @@ it('requires explicit parent resumption after max_iterations, retains evidence a
       context,
     )) as import('./cline-delegation.js').DelegatedTaskResult;
     expect(resumed.status).toBe('completed');
+    expect(resumed.completion?.status).toBe('completed');
     expect(resumed.recovery).toBeUndefined();
     expect(writes).toBe(1);
     expect(sessions.size).toBe(1);
@@ -67,6 +179,81 @@ it('requires explicit parent resumption after max_iterations, retains evidence a
       1,
     );
     await expect(tool.resumeTool.execute(input, context)).rejects.toThrow(/already used/);
+  } finally {
+    f.stop();
+  }
+});
+
+it('invalidates a completion claim if another operation runs afterward', async () => {
+  let step = 0;
+  const f = fixture(() => {
+    if (step++ === 0)
+      return completion('', [
+        { name: 'report_task_result', args: { status: 'completed', evidence: 'state verified', remainingWork: '' } },
+      ]);
+    if (step === 2) return completion('', [{ name: 'probe', args: {} }]);
+    return completion('done');
+  });
+  try {
+    const tool = buildClineDelegateTasksTool({
+      ...f.options,
+      extraChildTools: [
+        createTool({
+          name: 'probe',
+          description: 'synthetic operation',
+          inputSchema: { type: 'object' },
+          execute: async () => 'changed state',
+        }),
+      ],
+    });
+    const output = (await tool.execute(tasks('work'), context)) as DelegateTasksOutput;
+    expect(output.results[0]?.completion?.status).toBe('unverified');
+    expect(tool.recoveryPrompt()).toContain('work');
+  } finally {
+    f.stop();
+  }
+});
+
+it('inherits exhaustive coverage in follow-ups and preserves checkpoint evidence after a timeout', async () => {
+  const steps = new Map<string, number>();
+  const f = fixture(async (body) => {
+    const id = objective(body),
+      n = steps.get(id) ?? 0;
+    steps.set(id, n + 1);
+    if (id === 'slow' && n > 0) {
+      await new Promise((r) => setTimeout(r, 80));
+      return completion();
+    }
+    if (n === 0)
+      return completion('', [
+        {
+          name: 'report_task_result',
+          args: {
+            status: id === 'slow' ? 'partial' : 'completed',
+            evidence: 'checkpoint: 12 read IDs retained',
+            remainingWork: id === 'slow' ? 'reconcile last page' : '',
+          },
+        },
+      ]);
+    return completion('worker finished');
+  });
+  try {
+    const tool = buildClineDelegateTasksTool({ ...f.options, childTimeoutMs: 40 });
+    const original = (await tool.execute(
+      { tasks: [{ ...task('original'), requireCoverage: true }] },
+      context,
+    )) as DelegateTasksOutput;
+    expect(original.results[0]?.completion?.status).toBe('partial');
+    const follow = (await tool.execute(
+      { tasks: [{ ...task('follow'), followUpTo: original.results[0]!.taskRef, requireCoverage: false }] },
+      context,
+    )) as DelegateTasksOutput;
+    expect(follow.results[0]?.completion?.status).toBe('partial');
+    expect(tool.recoveryPrompt()).toContain(original.results[0]!.taskRef);
+    const slow = (await tool.execute(tasks('slow'), context)) as DelegateTasksOutput;
+    expect(slow.results[0]?.status).toBe('cancelled');
+    expect(slow.results[0]?.completion?.evidence).toContain('12 read IDs');
+    expect(slow.results[0]?.completion?.remainingWork).toBe('reconcile last page');
   } finally {
     f.stop();
   }
@@ -116,10 +303,10 @@ it('emits safe titled child lifecycle with independent IDs, and distinguishes ti
       context,
     );
     const states = events.filter((e) => e.kind === 'task').map((e) => e.state);
-    expect(states).toEqual(['queued', 'running', 'completed']);
+    expect(states).toEqual(['queued', 'running', 'partial']);
     expect(JSON.stringify(events)).not.toContain('PRIVATE');
     expect(events.filter((e) => e.kind === 'task').every((e) => e.title === '現在の通知設定と収集日を照合')).toBe(true);
-    expect(events.filter((e) => e.kind === 'batch').map((e) => e.state)).toEqual(['running', 'completed']);
+    expect(events.filter((e) => e.kind === 'batch').map((e) => e.state)).toEqual(['running', 'partial']);
     events.length = 0;
     await tool.execute({ tasks: [{ ...task('second'), title: 'Bearer PRIVATE' }] }, context);
     expect(events.filter((e) => e.kind === 'task').every((e) => e.title === 'タスク 2')).toBe(true);
