@@ -12,6 +12,61 @@ import { FinalResponseGate } from './cline-final-response.js';
 const context: AgentToolContext = { agentId: 'parent', iteration: 1 };
 const task = (id: string) => ({ id, objective: id, expectedOutput: 'concise result' });
 
+it('accepts nullable optional fields for new tasks and reports actionable errors for invented follow-up IDs', async () => {
+  const f = fixture(() => completion('synthetic read-only result'));
+  try {
+    const tool = buildClineDelegateTasksTool(f.options);
+    const output = (await tool.execute(
+      { tasks: [{ ...task('first'), title: null, context: null, followUpTo: null, requireCoverage: null }] },
+      context,
+    )) as DelegateTasksOutput;
+    expect(output.results[0]?.status).toBe('completed');
+    const invalid = { tasks: [{ ...task('bad'), followUpTo: '00000000-0000-0000-0000-000000000000' }] };
+    for (let i = 0; i < 3; i++) await expect(tool.execute(invalid, context)).rejects.toThrow('followUpTo: null');
+    expect(() => tool.assertInputBudget()).toThrow('three invalid inputs');
+    tool.resetTurn();
+    expect(() => tool.assertInputBudget()).not.toThrow();
+  } finally {
+    f.stop();
+  }
+});
+
+it('advertises null for absent optional values through the real Responses request adapter', async () => {
+  let inspected = false;
+  const server = Bun.serve({
+    port: 0,
+    hostname: '127.0.0.1',
+    async fetch(req) {
+      const body = (await req.json()) as { tools: Array<{ name: string; parameters: any }> };
+      const params = body.tools.find((t) => t.name === 'delegate_tasks')!.parameters;
+      for (const key of ['followUpTo', 'title', 'context', 'requireCoverage']) {
+        expect(JSON.stringify(params.properties.tasks.items.properties[key])).toContain('null');
+      }
+      inspected = true;
+      return Response.json(
+        { error: { message: 'synthetic stop after request inspection', type: 'invalid_request_error' } },
+        { status: 400 },
+      );
+    },
+  });
+  const f = fixture(() => completion());
+  try {
+    const tool = buildClineDelegateTasksTool(f.options);
+    await new Agent({
+      providerId: 'openai-native',
+      modelId: 'test',
+      baseUrl: `http://127.0.0.1:${server.port}/v1`,
+      apiKey: 'placeholder',
+      tools: [tool],
+      maxIterations: 1,
+    }).run('synthetic request');
+    expect(inspected).toBe(true);
+  } finally {
+    server.stop(true);
+    f.stop();
+  }
+});
+
 it('treats SDK completion without evidence as unverified and retains timeout gaps for parent recovery', async () => {
   const f = fixture(() => completion('12 read, count unknown'));
   try {

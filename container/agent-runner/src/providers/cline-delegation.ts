@@ -63,22 +63,25 @@ export function delegationInputSchema(maxTasks = 4) {
                 .trim()
                 .min(1)
                 .max(PROGRESS_TITLE_MAX_LENGTH)
+                .nullable()
                 .optional()
                 .describe(
                   'Specific public task title (up to 60 characters), e.g. 公式カレンダーで対象の収集日を確認. No private data, names, email subjects, URLs, paths, credentials, mentions, or raw objective/context.',
                 ),
               objective: z.string().trim().min(1).max(1500),
-              context: z.string().trim().min(1).max(3000).optional(),
+              context: z.string().trim().min(1).max(3000).nullable().optional(),
               expectedOutput: z.string().trim().min(1).max(1000),
               followUpTo: z
                 .string()
                 .uuid()
+                .nullable()
                 .optional()
                 .describe(
-                  'taskRef of an earlier task in this turn whose remaining work this task completes. Copy its evidence/checkpoint into context. Do not replay the original objective.',
+                  'Use null for a new independent task. For a follow-up only, copy a real taskRef returned earlier in this turn. Never invent a UUID or use an all-zero placeholder. Copy prior evidence/checkpoint into context; do not replay completed work.',
                 ),
               requireCoverage: z
                 .boolean()
+                .nullable()
                 .optional()
                 .describe(
                   'Set true for exhaustive reviews. Completion then requires all pages finished and matching listed/reviewed/classified ID sets in report_task_result.',
@@ -150,6 +153,7 @@ export type ClineDelegateTasksTool = AgentTool & {
   resetTurn(): void;
   resumeTool: AgentTool;
   recoveryPrompt(): string | undefined;
+  assertInputBudget(): void;
 };
 const CHILD_TIMEOUT_MS = 300_000;
 
@@ -176,6 +180,7 @@ export function buildClineDelegateTasksTool(
   // and the existing registry-lifetime MCP retry budget intentionally remain shared.
   const toolExecution = new Semaphore(1);
   let reserved = 0;
+  let invalidInputs = 0;
   let batches = 0;
   type TaskProgress = { batchId: string; taskId: string; ordinal: number; title?: string };
   const batchOrdinals = new Map<string, number>();
@@ -224,7 +229,10 @@ export function buildClineDelegateTasksTool(
     let result: DelegatedTaskResult = { id: task.id, taskRef: progress.taskId, status: 'failed', durationMs: 0 };
     const report =
       resume?.report ??
-      workerCompletionReport(task.requireCoverage, task.followUpTo ? outcomes.get(task.followUpTo)?.listedIds : []);
+      workerCompletionReport(
+        task.requireCoverage ?? false,
+        task.followUpTo ? outcomes.get(task.followUpTo)?.listedIds : [],
+      );
     report.clear();
     const toolRuns = new Set<Promise<unknown>>();
     const parentSignal =
@@ -378,8 +386,8 @@ export function buildClineDelegateTasksTool(
       if (saved) saved.durationMs = result.durationMs;
       outcomes.set(progress.taskId, {
         result,
-        followUpTo: task.followUpTo,
-        requireCoverage: task.requireCoverage,
+        followUpTo: task.followUpTo ?? undefined,
+        requireCoverage: task.requireCoverage ?? undefined,
         listedIds: report.listedIds(),
       });
       emit({
@@ -405,11 +413,19 @@ export function buildClineDelegateTasksTool(
     timeoutMs: limits.maxTasksPerTurn * childTimeoutMs + 30_000,
     retryable: false,
     execute: async (input: unknown, context: AgentToolContext): Promise<DelegateTasksOutput> => {
-      const { tasks } = schema.parse(input);
-      for (const task of tasks) {
-        if (task.followUpTo && !outcomes.has(task.followUpTo))
-          throw new Error('followUpTo must reference an earlier task in this turn');
-        if (task.followUpTo && outcomes.get(task.followUpTo)?.requireCoverage) task.requireCoverage = true;
+      let tasks: DelegatedTask[];
+      try {
+        ({ tasks } = schema.parse(input));
+        for (const task of tasks) {
+          if (task.followUpTo && !outcomes.has(task.followUpTo))
+            throw new Error(
+              'followUpTo must reference an earlier task in this turn. For a NEW task use followUpTo: null (or omit it). Never use a placeholder UUID.',
+            );
+          if (task.followUpTo && outcomes.get(task.followUpTo)?.requireCoverage) task.requireCoverage = true;
+        }
+      } catch (error) {
+        invalidInputs++;
+        throw error;
       }
       if (reserved + tasks.length > limits.maxTasksPerTurn) throw new Error('Delegation turn task budget exceeded');
       const firstOrdinal = reserved + 1;
@@ -421,7 +437,7 @@ export function buildClineDelegateTasksTool(
         batchId,
         taskId: crypto.randomUUID(),
         ordinal: firstOrdinal + index,
-        title: safeProgressTitle(task.title, firstOrdinal + index),
+        title: safeProgressTitle(task.title ?? undefined, firstOrdinal + index),
       }));
       for (const task of progress) emit({ kind: 'task', ...task, state: 'queued' });
       reserved += tasks.length; // Synchronous reservation across concurrent calls.
@@ -502,6 +518,12 @@ export function buildClineDelegateTasksTool(
   return {
     ...tool,
     resumeTool,
+    assertInputBudget() {
+      if (invalidInputs >= 3)
+        throw new Error(
+          'Delegation stopped after three invalid inputs. No further model calls will repeat rejected requests; check the task input schema and use followUpTo: null for new tasks.',
+        );
+    },
     recoveryPrompt() {
       // A verified follow-up closes its ancestor(s), including a chain of failed attempts.
       const closed = new Set<string>();
@@ -539,6 +561,7 @@ export function buildClineDelegateTasksTool(
       if (pendingBatches || toolExecution.active)
         throw new Error('Cannot reset delegation budget while children are running');
       reserved = 0;
+      invalidInputs = 0;
       batches = 0;
       recoveries.clear();
       batchOrdinals.clear();

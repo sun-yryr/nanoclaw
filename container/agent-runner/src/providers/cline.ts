@@ -1,5 +1,5 @@
 import { Agent, createTool } from '@cline/sdk';
-import type { AgentRunResult, AgentRuntimeEvent } from '@cline/agents';
+import type { AgentRunResult, AgentRuntimeEvent, AgentRuntimeHooks } from '@cline/agents';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { spawnSync } from 'child_process';
@@ -508,7 +508,14 @@ export class ClineProvider implements AgentProvider {
         const baseHooks = deferral ? composeDeferralAndModelIoHooks(deferral, modelIoHooks) : modelIoHooks;
         const finalGate = new FinalResponseGate();
         let finalResponseTimedOut = false;
-        const hooks = finalGate.hooks(baseHooks, modelIoHooks);
+        const completionHooks: AgentRuntimeHooks = {
+          ...baseHooks,
+          beforeModel: (context: Parameters<NonNullable<AgentRuntimeHooks['beforeModel']>>[0]) => {
+            delegation?.assertInputBudget();
+            return baseHooks.beforeModel?.(context);
+          },
+        };
+        const hooks = finalGate.hooks(completionHooks, modelIoHooks);
 
         const agent = new Agent({
           providerId,

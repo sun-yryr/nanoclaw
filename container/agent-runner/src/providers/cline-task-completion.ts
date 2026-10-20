@@ -14,6 +14,7 @@ const reportSchema = z
         paginationComplete: z.boolean(),
       })
       .strict()
+      .nullable()
       .optional(),
   })
   .strict()

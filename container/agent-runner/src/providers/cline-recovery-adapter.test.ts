@@ -63,7 +63,13 @@ function reply(text: string, calls?: Array<{ name: string; args: unknown }>) {
 it('withholds a premature disclaimer, asks the parent to recover only missing work and publishes one verified final', async () => {
   let parentCalls = 0;
   const childCalls = new Map<string, number>();
-  const task = (id: string) => ({ id, objective: id, expectedOutput: 'verified evidence' });
+  const task = (id: string) => ({
+    id,
+    objective: id,
+    expectedOutput: 'verified evidence',
+    followUpTo: null,
+    requireCoverage: false,
+  });
   const server = Bun.serve({
     port: 0,
     hostname: '127.0.0.1',
@@ -82,6 +88,7 @@ it('withholds a premature disclaimer, asks the parent to recover only missing wo
                   evidence:
                     id === 'verify' ? '12 read' : '12 enumerated = 12 read; next page absent; boundaries checked',
                   remainingWork: id === 'verify' ? 'count reconciliation' : '',
+                  coverage: null,
                 },
               },
             ])
@@ -136,6 +143,51 @@ it('withholds a premature disclaimer, asks the parent to recover only missing wo
     expect(childCalls.get('remember')).toBe(2);
     expect(childCalls.get('verify')).toBe(2);
     expect(childCalls.get('remaining-count')).toBe(2);
+  } finally {
+    query.abort();
+    server.stop(true);
+  }
+});
+
+it('stops repeated invalid delegation inputs after three model calls instead of exhausting 50 iterations', async () => {
+  let calls = 0;
+  const server = Bun.serve({
+    port: 0,
+    hostname: '127.0.0.1',
+    async fetch() {
+      calls++;
+      return reply('', [
+        {
+          name: 'delegate_tasks',
+          args: {
+            tasks: [
+              {
+                id: 'read',
+                objective: 'synthetic read only',
+                expectedOutput: 'evidence',
+                followUpTo: '00000000-0000-0000-0000-000000000000',
+              },
+            ],
+          },
+        },
+      ]);
+    },
+  });
+  Object.assign(process.env, {
+    CLINE_BASE_URL: `http://127.0.0.1:${server.port}/v1`,
+    CLINE_SPAWN_BASE_URL: `http://127.0.0.1:${server.port}/v1`,
+    CLINE_SPAWN_MODEL: 'worker',
+    CLINE_SPAWN_API: 'chat',
+    CLINE_SPAWN_MAX_ITERATIONS: '6',
+  });
+  const query = new ClineProvider().query({ prompt: 'synthetic request', cwd: directory });
+  query.end();
+  try {
+    const results: ProviderEvent[] = [];
+    for await (const event of query.events) if (event.type === 'result') results.push(event);
+    expect(calls).toBe(3);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ isError: true });
   } finally {
     query.abort();
     server.stop(true);

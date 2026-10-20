@@ -51,6 +51,12 @@ self-reported sets cannot prove that retrieval was exhaustive.
 
 Each result includes a turn-local `taskRef`. A follow-up supplies `followUpTo`
 referencing an earlier result and includes prior evidence/checkpoints in context.
+For a new independent task, `followUpTo` is null or omitted; fabricated UUIDs
+are rejected with instructions to correct the field. Optional task fields and
+worker coverage accept null so Responses clients can explicitly represent
+absent values. After three invalid delegation inputs in a turn, the provider
+stops before the next model request rather than repeating rejected calls until
+the 50-iteration ceiling. Valid task attempts keep their separate existing budget.
 It must finish that task's remaining work, and automatically inherits its coverage
 requirement. A completed follow-up closes its incomplete ancestors; completed
 siblings are left alone. Recovery IDs continue to handle iteration ceilings;
