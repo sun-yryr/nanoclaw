@@ -12,6 +12,7 @@ import type { McpServerConfig, ProviderSpeed } from './providers/types.js';
 const CONFIG_PATH = '/workspace/agent/container.json';
 
 export interface RunnerConfig {
+  computerUse?: true;
   provider: string;
   assistantName: string;
   groupName: string;
@@ -49,6 +50,7 @@ export function loadConfig(): RunnerConfig {
 /** Build the runner config from a parsed container.json; missing fields take their defaults. */
 export function runnerConfigFromRaw(raw: Record<string, unknown>): RunnerConfig {
   return {
+    ...(raw.computerUse === true ? { computerUse: true as const } : {}),
     provider: (raw.provider as string) || 'claude',
     assistantName: (raw.assistantName as string) || '',
     groupName: (raw.groupName as string) || '',

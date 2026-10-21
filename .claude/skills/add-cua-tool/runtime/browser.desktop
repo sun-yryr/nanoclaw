@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=NanoClaw Browser
+Exec=chromium --user-data-dir=/home/cua/.config/nanoclaw-browser --no-first-run --disable-dev-shm-usage --disable-quic about:blank
+Terminal=false

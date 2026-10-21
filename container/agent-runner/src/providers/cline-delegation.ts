@@ -1,6 +1,7 @@
 /** Turn-scoped batching over the pinned Cline spawn tool. No automatic retries. */
 import { createTool, type AgentTool, type AgentToolContext } from '@cline/sdk';
 import { z } from 'zod';
+import type { ComputerSession } from '../computer-use/client.js';
 import crypto from 'node:crypto';
 import { workerCompletionReport, type TaskCompletion } from './cline-task-completion.js';
 import {
@@ -67,6 +68,13 @@ export function delegationInputSchema(maxTasks = 4) {
                 .optional()
                 .describe(
                   'Specific public task title (up to 60 characters), e.g. 公式カレンダーで対象の収集日を確認. No private data, names, email subjects, URLs, paths, credentials, mentions, or raw objective/context.',
+                ),
+              computer: z
+                .boolean()
+                .nullable()
+                .optional()
+                .describe(
+                  'Set true only when this task needs the persistent GUI desktop. GUI tasks take turns; login state is shared.',
                 ),
               objective: z.string().trim().min(1).max(1500),
               context: z.string().trim().min(1).max(3000).nullable().optional(),
@@ -159,6 +167,7 @@ const CHILD_TIMEOUT_MS = 300_000;
 
 export function buildClineDelegateTasksTool(
   options: BuildClineSpawnAgentToolOptions & {
+    createComputerSession?: (owner: string) => ComputerSession;
     limits?: DelegationLimits;
     childTimeoutMs?: number;
     parentSignal?: AbortSignal;
@@ -193,6 +202,7 @@ export function buildClineDelegateTasksTool(
     string,
     {
       task: DelegatedTask;
+      computer?: ComputerSession;
       child: ClineSpawnAgentTool;
       progress: TaskProgress;
       owner: string;
@@ -219,6 +229,7 @@ export function buildClineDelegateTasksTool(
     context: AgentToolContext,
     progress: TaskProgress,
     resume?: {
+      computer?: ComputerSession;
       child: ClineSpawnAgentTool;
       instruction: string;
       durationMs: number;
@@ -234,6 +245,7 @@ export function buildClineDelegateTasksTool(
         task.followUpTo ? outcomes.get(task.followUpTo)?.listedIds : [],
       );
     report.clear();
+    const computer = resume?.computer ?? (task.computer ? options.createComputerSession?.(progress.taskId) : undefined);
     const toolRuns = new Set<Promise<unknown>>();
     const parentSignal =
       context.signal && options.parentSignal
@@ -254,6 +266,8 @@ export function buildClineDelegateTasksTool(
         timedOut = true;
         controller.abort(new Error('Worker timeout'));
       }, childTimeoutMs);
+      if (task.computer && !computer) throw new Error('Computer use is not enabled for this group');
+      await computer?.start(controller.signal);
       const wrap = (tool: AgentTool): AgentTool => ({
         ...tool,
         execute(input: unknown, ctx: AgentToolContext) {
@@ -279,7 +293,7 @@ export function buildClineDelegateTasksTool(
         resume?.child ??
         buildClineSpawnAgentTool({
           ...options,
-          extraChildTools: [...(options.extraChildTools ?? []), report.tool],
+          extraChildTools: [...(options.extraChildTools ?? []), ...(computer?.tools ?? []), report.tool],
           wrapChildTool: wrap,
         });
       const executionContext = { ...context, signal: controller.signal };
@@ -321,6 +335,7 @@ export function buildClineDelegateTasksTool(
         const id = crypto.randomUUID();
         recoveries.set(id, {
           task,
+          computer,
           child,
           progress,
           owner: context.agentId,
@@ -378,6 +393,7 @@ export function buildClineDelegateTasksTool(
       // Keep the child slot and action lock until the actual execution ends.
       controller.abort();
       await Promise.allSettled([...toolRuns]);
+      await computer?.close();
       clearTimeout(timer);
       parentSignal?.removeEventListener('abort', abort);
       release?.();
@@ -490,6 +506,7 @@ export function buildClineDelegateTasksTool(
       try {
         const result = await runTask(saved.task, context, saved.progress, {
           child: saved.child,
+          computer: saved.computer,
           instruction,
           durationMs: saved.durationMs,
           report: saved.report,

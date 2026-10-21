@@ -126,6 +126,8 @@ export interface InboundMailbox {
    */
   armNextTask(originalId: string, task: Task): Promise<void>;
   countLiveTasks(): number;
+  /** Optional transient RPC cleanup; host remains the only inbound writer. */
+  pruneSystemMessages?(idPrefix: string, before: string): number;
   prunePendingMessages(channelType: string, before: string, keep: number): number;
   getInboundHistory(limit: number): MailboxHistoryMessage[];
   getConversationRoot(): MailboxTimelineMessage | undefined;

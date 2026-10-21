@@ -1,3 +1,5 @@
+import { getConfig } from '../config.js';
+import { createComputerSession } from '../computer-use/client.js';
 import { Agent, createTool } from '@cline/sdk';
 import type { AgentRunResult, AgentRuntimeEvent, AgentRuntimeHooks } from '@cline/agents';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -459,6 +461,13 @@ export class ClineProvider implements AgentProvider {
             extraChildTools: [memoryReadTool, memoryWriteTool, ...mcpTools],
             useMcpDeferral: spawnAuthMode !== 'siwc',
             parentSignal: queryAbort.signal,
+            createComputerSession: (() => {
+              try {
+                return getConfig().computerUse ? createComputerSession : undefined;
+              } catch {
+                return undefined;
+              }
+            })(),
             onProgress: (event) => {
               events.push({ type: 'delegation', event });
               eventWaiting?.();
@@ -497,6 +506,16 @@ export class ClineProvider implements AgentProvider {
           input.systemContext?.instructions,
           claudeMd,
           spawnConfig ? clineSpawnSystemPromptHint(spawnConfig.modelId) : '',
+          delegation &&
+          (() => {
+            try {
+              return getConfig().computerUse;
+            } catch {
+              return false;
+            }
+          })()
+            ? 'A persistent GUI desktop is available. Set computer: true on delegate_tasks entries that need GUI work. Workers share the same browser login state and take turns. Prefer existing CLI/DOM tools for ordinary browser work. GUI tasks must observe current state before acting and leave authentication intact.'
+            : '',
         ]
           .filter(Boolean)
           .join('\n\n');

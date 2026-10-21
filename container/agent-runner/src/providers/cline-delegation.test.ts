@@ -839,3 +839,51 @@ it('waits for uncooperative tool execution to settle after a child deadline', as
     f.stop();
   }
 });
+
+it('wires GUI only into opted-in children, passes image bytes to the model and releases the desktop', async () => {
+  const calls: string[] = [];
+  let sawImage = false;
+  const counts = new Map<string, number>();
+  const f = fixture((body) => {
+    const id = objective(body);
+    const step = counts.get(id) ?? 0;
+    counts.set(id, step + 1);
+    const names = (body.tools ?? []).map((t) => t.function.name);
+    if (id === 'gui') {
+      expect(names).toContain('gui_observe');
+      if (step === 0) return completion('', [{ name: 'gui_observe', args: {} }]);
+      sawImage = JSON.stringify(body.messages).includes('data:image/png;base64,AA==');
+    } else expect(names).not.toContain('gui_observe');
+    return completion();
+  });
+  try {
+    const tool = buildClineDelegateTasksTool({
+      ...f.options,
+      createComputerSession: (owner) => ({
+        tools: [
+          createTool({
+            name: 'gui_observe',
+            description: 'Observe screen',
+            inputSchema: { type: 'object' },
+            execute: async () => [{ type: 'image', data: 'AA==', mediaType: 'image/png' }],
+          }),
+        ],
+        async start() {
+          calls.push(`start:${owner}`);
+        },
+        async close() {
+          calls.push(`close:${owner}`);
+        },
+      }),
+    });
+    const result = (await tool.execute(
+      { tasks: [{ ...task('gui'), computer: true }, task('plain')] },
+      context,
+    )) as DelegateTasksOutput;
+    expect(result.summary.completed).toBe(2);
+    expect(sawImage).toBe(true);
+    expect(calls).toEqual([`start:${result.results[0]!.taskRef}`, `close:${result.results[0]!.taskRef}`]);
+  } finally {
+    f.stop();
+  }
+});

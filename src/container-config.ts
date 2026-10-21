@@ -8,6 +8,7 @@
  *     from the DB at spawn time
  *   - `configFromDb()` — builds a `ContainerConfig` from a DB row + agent group
  */
+import { getGuiEnvironment } from './modules/computer-use/store.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -237,6 +238,7 @@ export interface AdditionalMountConfig {
 
 /** Shape of the materialized `container.json` file read by the container runner. */
 export interface ContainerConfig {
+  computerUse?: true;
   mcpServers: Record<string, McpServerConfig>;
   packages: { apt: string[]; npm: string[] };
   imageTag?: string;
@@ -414,6 +416,7 @@ export async function materializeContainerJson(agentGroupId: string): Promise<Co
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
   const config = configFromDb(row, group);
+  if (await getGuiEnvironment(agentGroupId, true)) config.computerUse = true;
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');
   const dir = path.dirname(p);

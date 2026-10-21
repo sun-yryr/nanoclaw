@@ -43,6 +43,7 @@
     "@clack/prompts": "^1.2.0",
     "@discordjs/voice": "0.19.2",
     "@onecli-sh/sdk": "2.2.1",
+    "@trycua/cua": "0.4.4",
     "better-sqlite3": "13.0.3",
     "chat": "4.29.0",
     "cron-parser": "5.5.0",

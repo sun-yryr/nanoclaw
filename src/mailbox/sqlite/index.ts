@@ -247,6 +247,12 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
           .prepare("SELECT COUNT(*) AS count FROM messages_in WHERE kind = 'task' AND status IN ('pending', 'paused')")
           .get() as { count: number }
       ).count,
+    pruneSystemMessages: (idPrefix, before) =>
+      db
+        .prepare(
+          "DELETE FROM messages_in WHERE kind = 'system' AND substr(id,1,?) = ? AND datetime(timestamp) <= datetime(?)",
+        )
+        .run(idPrefix.length, idPrefix, before).changes,
     prunePendingMessages: (channelType, before, keep) => {
       const expired = db
         .prepare(

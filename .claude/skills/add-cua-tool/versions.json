@@ -1,0 +1,5 @@
+{
+  "cua-sdk": "0.4.4",
+  "linux-amd64-image": "ghcr.io/trycua/linux@sha256:6feb7823caf090e7578cafb7c751cdb422a9682e58d32826e681b63acfa5678c",
+  "runtime-revision": 1
+}
