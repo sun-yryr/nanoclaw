@@ -1,0 +1,16 @@
+[Unit]
+Description=NanoClaw persistent read-only Cua viewer
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=@PROJECT_ROOT@
+ExecStart=@NODE@ --import tsx @PROJECT_ROOT@/.claude/skills/add-cua-tool/scripts/watch.ts @CONFIG@
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+
+[Install]
+WantedBy=default.target

@@ -36,6 +36,39 @@ the desktop. This is intended for the operator's personal group.
 
 ## Watch or log in
 
+### Permanent LAN viewing
+
+The fixed entry point runs `scripts/watch.ts` as a separate operator service.
+It embeds the standard Cua viewer and automatically renews read-only tickets,
+including after `computer resume` rotates the root token. It never pauses agents.
+All devices that can reach this private LAN endpoint may watch; no separate
+login is requested. Keep this service on the explicitly selected private IP.
+
+1. Store a private JSON config outside the GUI-mounted directory, for example
+   `data/computer-use-viewers/<group-id>/watch.json`, with `group`, `host` (LAN
+   IPv4), `port` (13214), `cert` and `key` (absolute server-certificate/key paths).
+   Reuse the CA already trusted by the viewing devices.
+2. Render `runtime/viewer.service.in`: replace `@PROJECT_ROOT@` with this checkout,
+   `@NODE@` with the absolute Node executable and `@CONFIG@` with that JSON path.
+   Install it as `~/.config/systemd/user/nanoclaw-cua-viewer-<install-slug>.service`.
+3. Stop only the old temporary `view.ts` forwarding process using that port.
+   Run `systemctl --user daemon-reload` and `systemctl --user enable --now
+   nanoclaw-cua-viewer-<install-slug>.service`. Existing host/desktop services stay up.
+4. Open `https://<LAN-IP>:13214/`. This fixed URL has no ticket. It reuses Cua's
+   standard viewer, checks the ticket every five seconds and renews five minutes
+   before its one-hour expiry. Transient disconnects retry automatically.
+5. Verify actual video, Cua's input rejection for a read-only ticket and automatic
+   reconnection after a service restart and a `computer resume`. Ensure the
+   browser process is preserved and agent GUI admission remains enabled.
+
+For interactive human control on this same service, run `view.ts <group-id>
+<private-output-file> --control --origin https://<LAN-IP>:13214`. It pauses agent
+input and creates the usual Cua control link without trying to bind the occupied
+port. Return control with `ncl computer resume --id <group-id>`. The fixed watch
+page automatically reconnects with a new read-only ticket afterwards.
+
+### Temporary operator links
+
 Generate a Cua-standard viewer ticket into an operator-only file:
 
 `pnpm exec tsx .claude/skills/add-cua-tool/scripts/view.ts <id> /tmp/cua-view.json`
@@ -83,6 +116,9 @@ Do not expose the guest control port publicly.
 - Another device's localhost points to that device, not this host. Use the LAN
   HTTPS option or an actual SSH tunnel. A successful host-browser test does not
   establish that a remote browser can reach the endpoint or trusts its CA.
+- Fixed watch page is reconnecting: inspect the viewer service status, desktop,
+  OneCLI network, certificate and port. It serves 503 while unable to obtain a
+  valid read-only ticket; it never uses a stale token as an input-capable fallback.
 - Gateway replacement: rerun setup to reattach it; inspect the GUI's proxy host
   mapping if its address changed. Do not recreate the profile to fix networking.
 

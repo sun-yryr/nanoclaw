@@ -19,6 +19,9 @@ const option = (flag: string) => {
 };
 const localPort = option('--local-port');
 const httpsHost = option('--https-host');
+const publicOrigin = option('--origin');
+if (publicOrigin && (localPort || httpsHost)) throw new Error('--origin uses an existing viewer service');
+if (publicOrigin && new URL(publicOrigin).protocol !== 'https:') throw new Error('--origin must use HTTPS');
 const port = httpsHost ? Number(option('--port') ?? 13214) : localPort === undefined ? undefined : Number(localPort);
 if (httpsHost && localPort) throw new Error('Choose --local-port or --https-host');
 const certPath = option('--tls-cert');
@@ -47,6 +50,13 @@ try {
   const view = await sb.viewerUrl(
     ViewerOptions.create({ viewOnly: !control, clipboard: false, microphone: false, ttlSeconds: 1800, filesRoot: '' }),
   );
+  if (publicOrigin) {
+    const url = new URL(view.url);
+    const origin = new URL(publicOrigin);
+    url.protocol = origin.protocol;
+    url.host = origin.host;
+    view.url = url.toString();
+  }
   if (port !== undefined) {
     const secure = httpsHost
       ? { host: httpsHost, cert: await fs.readFile(certPath!), key: await fs.readFile(keyPath!) }

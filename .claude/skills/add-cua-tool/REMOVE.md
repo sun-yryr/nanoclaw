@@ -24,7 +24,13 @@
 
 Existing release/restart/sweep paths never destroy a Cua desktop automatically.
 
-Viewer forwarding is temporary. Terminate the running `view.ts` command or wait
+For permanent watching, first disable and stop this copy's
+`nanoclaw-cua-viewer-<install-slug>.service`, remove its user unit, and run
+`systemctl --user daemon-reload`. Remove `src/modules/computer-use/watch.ts`,
+its tests, the skill's `watch.ts` and service template on code rollback. Remove
+only this group's optional `watch.json` configuration. None of this stops the desktop.
+
+Temporary viewer forwarding: terminate the running `view.ts` command or wait
 30 minutes to close its listener and streams; this never stops the desktop.
 On full removal, revoke/remove the optional local viewer CA from devices where
 the operator installed it, then remove `data/computer-use-viewers/<group-id>/` if no

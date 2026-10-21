@@ -53,6 +53,25 @@ images. Input text is still part of session request storage, like other task dat
 
 ## Human viewing and control
 
+For this personal LAN installation, a separate enabled user service runs the
+skill's `watch.ts`. Its fixed URL is `https://<host-LAN-IP>:13214/`, with no ticket
+in the address bar. Any device that can reach that LAN interface may watch after
+trusting the configured certificate. The service uses the standard Cua viewer in
+a same-origin frame; only its embedding policy is narrowed from `none` to `self`.
+The outer page rejects embedding by other sites, and HTTP/WebSocket requests
+reject mismatching Host/Origin values. Root credentials are never sent to browsers.
+
+The fixed page polls its read-only session every five seconds. The host caches
+the Cua ticket across viewers, renews it five minutes before its one-hour expiry,
+and reacquires it after a root-token rotation. A failed refresh displays a
+reconnecting state and retries; waking a background tab refreshes immediately.
+Watching never changes agent admission or leases, including during human control.
+The service supervises itself with systemd and survives NanoClaw host restarts.
+Its JSON config and TLS keys live outside the GUI mount under
+`data/computer-use-viewers/<group-id>/`. See the install skill's permanent-viewing
+steps and service template. Renew TLS certificates before expiry; keeping the
+viewer process running does not extend their validity.
+
 Use the skill's `view.ts` to create Cua-standard view-only or interactive tickets.
 It stores the URL in a private file rather than ordinary logs. `--control` calls
 host-only `computer pause` and waits for in-flight calls before enabling human
@@ -62,10 +81,14 @@ reenable agents. Chromium and its login stay running. Old viewer tickets become
 invalid. These commands use the existing local operator socket and are denied to
 container callers, including callers with global CLI scope.
 
+With the permanent service running, pass `--origin https://<host-LAN-IP>:13214`
+to `view.ts --control`, instead of starting another temporary forwarder on the
+same port. After control is returned, the fixed watch page reconnects on its own.
+
 The Cua endpoint is the verified IP on the internal bridge and is not published
 on the internet. For a remote PC, use existing authenticated host access/tunneling
-or configure Cua's supported remote access separately. No custom viewer or login
-site is introduced. WebCodecs needs HTTPS/localhost. With this pinned Linux guest,
+or configure Cua's supported remote access separately. Display and input remain
+in the standard Cua viewer. WebCodecs needs HTTPS/localhost. With this pinned Linux guest,
 private HTTP access reports `no acceptable codec`: the advertised PNG fallback
 does not negotiate. For a local browser, add `--local-port 13211` to `view.ts`
 and keep that command running. It writes a localhost ticket URL and forwards TCP
@@ -82,6 +105,7 @@ serves TLS, including video WebSockets, with Cua's existing ticket authenticatio
 The certificate must cover the LAN IP and its CA must be trusted on the viewing
 device. A localhost URL without a tunnel points to the viewing device itself.
 Both forwarding modes last 30 minutes and require the command to stay running.
+Those limits apply to temporary links, not to the permanent watch service.
 
 Keep viewer TLS material in a separate host-only directory, for example
 `data/computer-use-viewers/<group-id>/`. Distribute only the public CA certificate
@@ -156,6 +180,25 @@ typechecks, formatting, module lint and skill-pin verification passed. Added
 regressions reject malformed operation values and prevent input after a failed
 fresh observation. Viewer TLS keys were moved outside the GUI-mounted directory.
 
-No real website login was performed. The operator can log in through Cua's
+Automated validation did not log into any real website. The operator can log in through Cua's
 interactive viewer. Site-specific login expiry and host/container recreation
 recovery remain operational checks when those situations occur.
+
+## Permanent watch validation on 2026-10-22
+
+- Full host suite: 3,714 passed, 1 existing skip. The seven new regressions cover
+  ticket caching/renewal/root-token rotation, retry after failure, HTTP origin and
+  Host checks, standard viewer proxying, binary WebSockets and browser reconnects.
+  Host build, runner/installer typechecks, lint, formatting and skill pins passed.
+- A real Chromium browser rendered the standard Cua viewer at the fixed HTTPS
+  root URL, using read-only media policy. HTTPS certificate and IP validation
+  succeeded with the configured CA; the isolated browser test pinned the server
+  certificate's public key. A read-only Cua ticket rejected pointer input.
+- NanoClaw could obtain a real 1280x800 screenshot while the viewer was open.
+  Both control-token rotation and a watch-service restart reconnected video
+  automatically, keeping the root browser URL unchanged and Chromium's PID intact.
+- An interactive `view.ts --control --origin ...` link also rendered through the
+  permanent service. Afterwards control was returned: agent GUI admission was
+  enabled and the fixed page reconnected using a new read-only ticket.
+- The viewer service is enabled for automatic startup and the host user already
+  has lingering enabled. The NanoClaw host and persistent desktop remain running.
