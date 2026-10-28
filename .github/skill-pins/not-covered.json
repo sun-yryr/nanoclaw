@@ -26,6 +26,60 @@
       "why": "installs whatever version is newest; pin an exact version so it can be tracked"
     },
     {
+      "pin": "CALENDAR_MCP_VERSION=2.6.1",
+      "kind": "binary (Dockerfile ARG)",
+      "source": ".claude/skills/add-gcal-tool/SKILL.md",
+      "why": "a download pinned by version; no Dependabot ecosystem reads it"
+    },
+    {
+      "pin": "@cocal/google-calendar-mcp@${CALENDAR_MCP_VERSION}",
+      "kind": "unpinned npm install",
+      "source": ".claude/skills/add-gcal-tool/SKILL.md",
+      "why": "installs whatever version is newest; pin an exact version so it can be tracked"
+    },
+    {
+      "pin": "CLAUDE_CODE_VERSION=2.1.154",
+      "kind": "binary (Dockerfile ARG)",
+      "source": ".claude/skills/add-gmail-tool/SKILL.md",
+      "why": "a download pinned by version; no Dependabot ecosystem reads it"
+    },
+    {
+      "pin": "AGENT_BROWSER_VERSION=latest",
+      "kind": "binary (Dockerfile ARG)",
+      "source": ".claude/skills/add-gmail-tool/SKILL.md",
+      "why": "a download pinned by version; no Dependabot ecosystem reads it"
+    },
+    {
+      "pin": "VERCEL_VERSION=52.2.1",
+      "kind": "binary (Dockerfile ARG)",
+      "source": ".claude/skills/add-gmail-tool/SKILL.md",
+      "why": "a download pinned by version; no Dependabot ecosystem reads it"
+    },
+    {
+      "pin": "BUN_VERSION=1.3.12",
+      "kind": "binary (Dockerfile ARG)",
+      "source": ".claude/skills/add-gmail-tool/SKILL.md",
+      "why": "a download pinned by version; no Dependabot ecosystem reads it"
+    },
+    {
+      "pin": "GMAIL_MCP_VERSION=1.1.11",
+      "kind": "binary (Dockerfile ARG)",
+      "source": ".claude/skills/add-gmail-tool/SKILL.md",
+      "why": "a download pinned by version; no Dependabot ecosystem reads it"
+    },
+    {
+      "pin": "GTASKS_MCP_VERSION=0.2.1",
+      "kind": "binary (Dockerfile ARG)",
+      "source": ".claude/skills/add-gtasks-tool/SKILL.md",
+      "why": "a download pinned by version; no Dependabot ecosystem reads it"
+    },
+    {
+      "pin": "@scottie-will/google-tasks-mcp@${GTASKS_MCP_VERSION}",
+      "kind": "unpinned npm install",
+      "source": ".claude/skills/add-gtasks-tool/SKILL.md",
+      "why": "installs whatever version is newest; pin an exact version so it can be tracked"
+    },
+    {
       "pin": "rust:1.93.0-alpine",
       "kind": "container image (Dockerfile FROM)",
       "source": ".claude/skills/add-iron-proxy/assets/managed-proxy.Dockerfile",
@@ -80,6 +134,18 @@
       "why": "read by the skill's own scripts; Dependabot does not read versions.json"
     },
     {
+      "pin": "MAPBOX_MCP_VERSION=0.12.5",
+      "kind": "binary (Dockerfile ARG)",
+      "source": ".claude/skills/add-mapbox-tool/SKILL.md",
+      "why": "a download pinned by version; no Dependabot ecosystem reads it"
+    },
+    {
+      "pin": "@mapbox/mcp-server@${MAPBOX_MCP_VERSION}",
+      "kind": "unpinned npm install",
+      "source": ".claude/skills/add-mapbox-tool/SKILL.md",
+      "why": "installs whatever version is newest; pin an exact version so it can be tracked"
+    },
+    {
       "pin": "MNEMON_VERSION=0.1.1",
       "kind": "binary (Dockerfile ARG)",
       "source": ".claude/skills/add-mnemon/SKILL.md",
@@ -102,6 +168,18 @@
       "kind": "version",
       "source": ".claude/skills/add-onecli/versions.json",
       "why": "read by the skill's own scripts; Dependabot does not read versions.json"
+    },
+    {
+      "pin": "golang:1.24-bookworm",
+      "kind": "container image (Dockerfile FROM)",
+      "source": ".claude/skills/add-tablesnap/SKILL.md",
+      "why": "a base image; Dependabot's docker ecosystem could read a Dockerfile, not configured"
+    },
+    {
+      "pin": "TABLESNAP_VERSION=1.0.0",
+      "kind": "binary (Dockerfile ARG)",
+      "source": ".claude/skills/add-tablesnap/SKILL.md",
+      "why": "a download pinned by version; no Dependabot ecosystem reads it"
     }
   ]
 }

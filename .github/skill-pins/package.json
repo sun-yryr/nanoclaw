@@ -38,7 +38,8 @@
     "spectrum-ts": "11.0.0",
     "vercel": "52.2.1",
     "wechat-ilink-client": "0.1.0",
-    "ws": "8.21.3"
+    "ws": "8.21.3",
+    "zod-to-json-schema": "3.22.5"
   },
   "skillPins": {
     "@anthropic-ai/claude-code": {
@@ -247,6 +248,13 @@
       "version": "8.21.3",
       "sources": [
         ".claude/skills/add-mattermost/SKILL.md nc:dep"
+      ]
+    },
+    "zod-to-json-schema": {
+      "version": "3.22.5",
+      "sources": [
+        ".claude/skills/add-gcal-tool/SKILL.md code block",
+        ".claude/skills/add-gmail-tool/SKILL.md code block"
       ]
     }
   }
