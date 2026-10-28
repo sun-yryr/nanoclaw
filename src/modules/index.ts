@@ -27,3 +27,5 @@ import './self-mod/index.js';
 import './community-portal/index.js';
 import './siwc-refresh/index.js';
 import './computer-use/index.js';
+
+import './reaction-feedback/index.js';

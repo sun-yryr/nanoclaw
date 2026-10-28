@@ -109,7 +109,15 @@ export interface OutboundFile {
 }
 
 /** Outbound message from host to adapter. */
+export interface DeliveryOrigin {
+  messageId: string;
+  sessionId: string;
+  agentGroupId: string;
+}
+
 export interface OutboundMessage {
+  /** Host-owned identity; never derived from agent message content. */
+  origin?: DeliveryOrigin;
   kind: string;
   content: unknown; // parsed JSON from messages_out
   files?: OutboundFile[]; // file attachments from the session outbox

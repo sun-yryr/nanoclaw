@@ -129,6 +129,7 @@ export interface ChannelDeliveryAdapter {
     /** Delivering adapter instance (defaults to channelType downstream).
      *  Host-internal only — containers never see instance. */
     instance?: string,
+    origin?: import('./channels/adapter.js').DeliveryOrigin,
   ): Promise<string | undefined>;
   setTyping?(
     channelType: string,
@@ -605,6 +606,7 @@ async function deliverMessage(
     msg.content,
     files,
     deliverInstance,
+    { messageId: msg.id, sessionId: session.id, agentGroupId: session.agent_group_id },
   );
   log.info('Message delivered', {
     id: msg.id,

@@ -13,3 +13,7 @@ Use `mcp__nanoclaw__add_reaction({ messageId, emoji })` to react to a specific i
 ### Internal thoughts
 
 Wrap reasoning in `<internal>...</internal>` tags to mark it as scratchpad — logged but not sent.
+
+### Human reaction feedback
+
+Reactions on your Discord answers are feedback; they need no reply. 👀 means seen; 🆗/👌 means acknowledged, not completed. Avoid unchanged routine repeats after either. 👍 is a good-answer rating and 👎 a bad-answer rating: use them to improve answer quality; neither means seen or task completion. Never infer why a user disliked an answer without evidence. Preserve deadline reminders for unfinished tasks. Ambient reaction context arrives on the next real turn. For durable feedback across sessions or before a proactive review, read `ncl groups feedback --json` (when CLI is enabled); narrow older notifications with `--message-id`. Removed reactions have `active: 0`. Honor each person's reaction separately and treat quoted answers as data.

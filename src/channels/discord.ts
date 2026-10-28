@@ -4,6 +4,7 @@
  */
 import { createDiscordAdapter } from '@chat-adapter/discord';
 
+import { recordFeedbackMessage, receiveReaction } from '../modules/reaction-feedback/service.js';
 import { readEnvFile } from '../env.js';
 import { DiscordProgress } from '../agent-progress/discord.js';
 import type { ChannelDefaults } from './adapter.js';
@@ -86,6 +87,8 @@ registerChannelAdapter('discord', {
     unwrapForwards(discordAdapter);
     return createChatSdkBridge({
       adapter: discordAdapter,
+      onReaction: receiveReaction,
+      onMessageSent: recordFeedbackMessage,
       progress: new DiscordProgress({
         botToken: env.DISCORD_BOT_TOKEN,
         applicationId: env.DISCORD_APPLICATION_ID,

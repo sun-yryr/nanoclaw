@@ -22,6 +22,7 @@ import {
   type AssistantThreadStartedEvent,
   type ConcurrencyStrategy,
   type FileUpload,
+  type ReactionEvent,
   type Message as ChatMessage,
 } from 'chat';
 import { downloadAttachmentBase64 } from '../attachment-download.js';
@@ -327,6 +328,16 @@ export function registerBridgeInboundPolicy(channelType: string, wrap: BridgeInb
 }
 
 export interface ChatSdkBridgeConfig {
+  onReaction?: (event: ReactionEvent, instance: string) => Promise<void>;
+  onMessageSent?: (
+    message: import('./adapter.js').OutboundMessage,
+    address: {
+      instance: string;
+      platformId: string;
+      threadId: string | null;
+      messageId: string;
+    },
+  ) => Promise<void>;
   /** Optional persistent Discord Components V2 transport; other adapters omit it. */
   progress?: ProgressTransport;
   adapter: Adapter;
@@ -613,6 +624,15 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // Subscribed threads — every message in a thread we've previously
       // engaged. Carry the SDK's `message.isMention` through so mention-mode
       // wirings still fire on in-thread mentions.
+      if (config.onReaction)
+        chat.onReaction(async (event) => {
+          try {
+            await config.onReaction!(event, instanceKey);
+          } catch (err) {
+            log.warn('Reaction feedback failed', { instance: instanceKey, err });
+          }
+        });
+
       chat.onSubscribedMessage(async (thread, message) => {
         const channelId = adapter.channelIdFromThreadId(thread.id);
         await setupConfig.onInbound(
@@ -841,6 +861,23 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // "discord:guildId:channelId") — use it directly as the thread ID
       const tid = threadId ?? platformId;
       const content = message.content as Record<string, unknown>;
+      const postMessage = async (body: AdapterPostableMessage) => {
+        const result = await adapter.postMessage(tid, body);
+        if (
+          result?.id &&
+          message.origin &&
+          config.onMessageSent &&
+          (message.kind === 'chat' || message.kind === 'chat-sdk')
+        ) {
+          // Feedback bookkeeping must never cause a successfully posted reply to be resent.
+          try {
+            await config.onMessageSent(message, { instance: instanceKey, platformId, threadId, messageId: result.id });
+          } catch (err) {
+            log.warn('Reaction message tracking failed', { messageId: result.id, err });
+          }
+        }
+        return result;
+      };
       if (message.kind === 'agent_progress' && config.progress) {
         return config.progress.deliver(platformId, threadId, content);
       }
@@ -897,7 +934,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         }
         const render = content.requirePresentation ? await resolveQuestionRender(questionId) : undefined;
         if (render?.renderMessage) {
-          const result = await adapter.postMessage(tid, render.renderMessage(questionId));
+          const result = await postMessage(render.renderMessage(questionId));
           return result?.id;
         }
         if (content.requirePresentation) throw new Error('Approval presentation adapter is unavailable');
@@ -918,7 +955,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             ),
           ],
         });
-        const result = await adapter.postMessage(tid, {
+        const result = await postMessage({
           card,
           fallbackText: `${title}\n\n${question}\nOptions: ${options.map((o) => o.label).join(', ')}`,
         });
@@ -984,7 +1021,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         }
 
         const card = Card({ title, children: cardChildren });
-        const result = await adapter.postMessage(tid, { card, fallbackText });
+        const result = await postMessage({ card, fallbackText });
         return result?.id;
       }
 
@@ -1007,7 +1044,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
-          const result = await adapter.postMessage(tid, toTextMessage(chunk, attachFiles ? fileUploads : undefined));
+          const result = await postMessage(toTextMessage(chunk, attachFiles ? fileUploads : undefined));
           if (i === 0) firstId = result?.id;
         }
         return firstId;
@@ -1017,7 +1054,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           data: f.data,
           filename: f.filename,
         }));
-        const result = await adapter.postMessage(tid, toTextMessage('', fileUploads));
+        const result = await postMessage(toTextMessage('', fileUploads));
         return result?.id;
       }
     },

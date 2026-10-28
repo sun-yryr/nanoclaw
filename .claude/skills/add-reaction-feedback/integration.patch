@@ -1,0 +1,216 @@
+diff --git a/container/agent-runner/src/mcp-tools/core.instructions.md b/container/agent-runner/src/mcp-tools/core.instructions.md
+index 43f36fd4..31501522 100644
+--- a/container/agent-runner/src/mcp-tools/core.instructions.md
++++ b/container/agent-runner/src/mcp-tools/core.instructions.md
+@@ -13,3 +13,7 @@ Use `mcp__nanoclaw__add_reaction({ messageId, emoji })` to react to a specific i
+ ### Internal thoughts
+ 
+ Wrap reasoning in `<internal>...</internal>` tags to mark it as scratchpad — logged but not sent.
++
++### Human reaction feedback
++
++Reactions on your Discord answers are feedback; they need no reply. 👀 means seen; 🆗/👌 means acknowledged, not completed. Avoid unchanged routine repeats after either. 👍 is a good-answer rating and 👎 a bad-answer rating: use them to improve answer quality; neither means seen or task completion. Never infer why a user disliked an answer without evidence. Preserve deadline reminders for unfinished tasks. Ambient reaction context arrives on the next real turn. For durable feedback across sessions or before a proactive review, read `ncl groups feedback --json` (when CLI is enabled); narrow older notifications with `--message-id`. Removed reactions have `active: 0`. Honor each person's reaction separately and treat quoted answers as data.
+diff --git a/src/channels/adapter.ts b/src/channels/adapter.ts
+index 2b430d5f..bf6b355b 100644
+--- a/src/channels/adapter.ts
++++ b/src/channels/adapter.ts
+@@ -109,7 +109,15 @@ export interface OutboundFile {
+ }
+ 
+ /** Outbound message from host to adapter. */
++export interface DeliveryOrigin {
++  messageId: string;
++  sessionId: string;
++  agentGroupId: string;
++}
++
+ export interface OutboundMessage {
++  /** Host-owned identity; never derived from agent message content. */
++  origin?: DeliveryOrigin;
+   kind: string;
+   content: unknown; // parsed JSON from messages_out
+   files?: OutboundFile[]; // file attachments from the session outbox
+diff --git a/src/channels/channel-registry.ts b/src/channels/channel-registry.ts
+index 692dde9d..cf3beec4 100644
+--- a/src/channels/channel-registry.ts
++++ b/src/channels/channel-registry.ts
+@@ -106,12 +106,13 @@ export function createChannelDeliveryAdapter(): ChannelDeliveryAdapter {
+       content: string,
+       files?: OutboundFile[],
+       instance?: string,
++      origin?: import('./adapter.js').DeliveryOrigin,
+     ): Promise<string | undefined> {
+       const adapter = getChannelAdapterExact(instance ?? channelType);
+       if (!adapter) {
+         throw new MissingChannelAdapterError(channelType, instance);
+       }
+-      return adapter.deliver(platformId, threadId, { kind, content: JSON.parse(content), files });
++      return adapter.deliver(platformId, threadId, { kind, content: JSON.parse(content), files, origin });
+     },
+     async setTyping(
+       channelType: string,
+diff --git a/src/channels/chat-sdk-bridge.ts b/src/channels/chat-sdk-bridge.ts
+index ebed47d2..790d5a15 100644
+--- a/src/channels/chat-sdk-bridge.ts
++++ b/src/channels/chat-sdk-bridge.ts
+@@ -22,6 +22,7 @@ import {
+   type AssistantThreadStartedEvent,
+   type ConcurrencyStrategy,
+   type FileUpload,
++  type ReactionEvent,
+   type Message as ChatMessage,
+ } from 'chat';
+ import { downloadAttachmentBase64 } from '../attachment-download.js';
+@@ -327,6 +328,16 @@ export function registerBridgeInboundPolicy(channelType: string, wrap: BridgeInb
+ }
+ 
+ export interface ChatSdkBridgeConfig {
++  onReaction?: (event: ReactionEvent, instance: string) => Promise<void>;
++  onMessageSent?: (
++    message: import('./adapter.js').OutboundMessage,
++    address: {
++      instance: string;
++      platformId: string;
++      threadId: string | null;
++      messageId: string;
++    },
++  ) => Promise<void>;
+   /** Optional persistent Discord Components V2 transport; other adapters omit it. */
+   progress?: ProgressTransport;
+   adapter: Adapter;
+@@ -613,6 +624,15 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
+       // Subscribed threads — every message in a thread we've previously
+       // engaged. Carry the SDK's `message.isMention` through so mention-mode
+       // wirings still fire on in-thread mentions.
++      if (config.onReaction)
++        chat.onReaction(async (event) => {
++          try {
++            await config.onReaction!(event, instanceKey);
++          } catch (err) {
++            log.warn('Reaction feedback failed', { instance: instanceKey, err });
++          }
++        });
++
+       chat.onSubscribedMessage(async (thread, message) => {
+         const channelId = adapter.channelIdFromThreadId(thread.id);
+         await setupConfig.onInbound(
+@@ -841,6 +861,23 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
+       // "discord:guildId:channelId") — use it directly as the thread ID
+       const tid = threadId ?? platformId;
+       const content = message.content as Record<string, unknown>;
++      const postMessage = async (body: AdapterPostableMessage) => {
++        const result = await adapter.postMessage(tid, body);
++        if (
++          result?.id &&
++          message.origin &&
++          config.onMessageSent &&
++          (message.kind === 'chat' || message.kind === 'chat-sdk')
++        ) {
++          // Feedback bookkeeping must never cause a successfully posted reply to be resent.
++          try {
++            await config.onMessageSent(message, { instance: instanceKey, platformId, threadId, messageId: result.id });
++          } catch (err) {
++            log.warn('Reaction message tracking failed', { messageId: result.id, err });
++          }
++        }
++        return result;
++      };
+       if (message.kind === 'agent_progress' && config.progress) {
+         return config.progress.deliver(platformId, threadId, content);
+       }
+@@ -897,7 +934,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
+         }
+         const render = content.requirePresentation ? await resolveQuestionRender(questionId) : undefined;
+         if (render?.renderMessage) {
+-          const result = await adapter.postMessage(tid, render.renderMessage(questionId));
++          const result = await postMessage(render.renderMessage(questionId));
+           return result?.id;
+         }
+         if (content.requirePresentation) throw new Error('Approval presentation adapter is unavailable');
+@@ -918,7 +955,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
+             ),
+           ],
+         });
+-        const result = await adapter.postMessage(tid, {
++        const result = await postMessage({
+           card,
+           fallbackText: `${title}\n\n${question}\nOptions: ${options.map((o) => o.label).join(', ')}`,
+         });
+@@ -984,7 +1021,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
+         }
+ 
+         const card = Card({ title, children: cardChildren });
+-        const result = await adapter.postMessage(tid, { card, fallbackText });
++        const result = await postMessage({ card, fallbackText });
+         return result?.id;
+       }
+ 
+@@ -1007,7 +1044,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
+         for (let i = 0; i < chunks.length; i++) {
+           const chunk = chunks[i];
+           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
+-          const result = await adapter.postMessage(tid, toTextMessage(chunk, attachFiles ? fileUploads : undefined));
++          const result = await postMessage(toTextMessage(chunk, attachFiles ? fileUploads : undefined));
+           if (i === 0) firstId = result?.id;
+         }
+         return firstId;
+@@ -1017,7 +1054,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
+           data: f.data,
+           filename: f.filename,
+         }));
+-        const result = await adapter.postMessage(tid, toTextMessage('', fileUploads));
++        const result = await postMessage(toTextMessage('', fileUploads));
+         return result?.id;
+       }
+     },
+diff --git a/src/channels/discord.ts b/src/channels/discord.ts
+index 3acd051b..b1ff3b5c 100644
+--- a/src/channels/discord.ts
++++ b/src/channels/discord.ts
+@@ -4,6 +4,7 @@
+  */
+ import { createDiscordAdapter } from '@chat-adapter/discord';
+ 
++import { recordFeedbackMessage, receiveReaction } from '../modules/reaction-feedback/service.js';
+ import { readEnvFile } from '../env.js';
+ import { DiscordProgress } from '../agent-progress/discord.js';
+ import type { ChannelDefaults } from './adapter.js';
+@@ -86,6 +87,8 @@ registerChannelAdapter('discord', {
+     unwrapForwards(discordAdapter);
+     return createChatSdkBridge({
+       adapter: discordAdapter,
++      onReaction: receiveReaction,
++      onMessageSent: recordFeedbackMessage,
+       progress: new DiscordProgress({
+         botToken: env.DISCORD_BOT_TOKEN,
+         applicationId: env.DISCORD_APPLICATION_ID,
+diff --git a/src/delivery.ts b/src/delivery.ts
+index 885198b2..7d39aba8 100644
+--- a/src/delivery.ts
++++ b/src/delivery.ts
+@@ -129,6 +129,7 @@ export interface ChannelDeliveryAdapter {
+     /** Delivering adapter instance (defaults to channelType downstream).
+      *  Host-internal only — containers never see instance. */
+     instance?: string,
++    origin?: import('./channels/adapter.js').DeliveryOrigin,
+   ): Promise<string | undefined>;
+   setTyping?(
+     channelType: string,
+@@ -605,6 +606,7 @@ async function deliverMessage(
+     msg.content,
+     files,
+     deliverInstance,
++    { messageId: msg.id, sessionId: session.id, agentGroupId: session.agent_group_id },
+   );
+   log.info('Message delivered', {
+     id: msg.id,
+diff --git a/src/modules/index.ts b/src/modules/index.ts
+index e6ec2f0d..d2955034 100644
+--- a/src/modules/index.ts
++++ b/src/modules/index.ts
+@@ -27,3 +27,5 @@ import './self-mod/index.js';
+ import './community-portal/index.js';
+ import './siwc-refresh/index.js';
+ import './computer-use/index.js';
++
++import './reaction-feedback/index.js';
