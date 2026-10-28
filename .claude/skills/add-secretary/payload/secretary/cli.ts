@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { fetchFeedback, notificationFeedback } from './feedback.ts';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Ledger, stamp, hash } from './ledger.ts';
@@ -85,8 +86,19 @@ export async function dispatch(ledger: Ledger, command: string, argument?: strin
       return ledger.status();
     case 'context': {
       const v = context(ledger);
+      // Query the host over ncl's session-DB transport, including feedback from other sessions.
+      let feedback: Awaited<ReturnType<typeof fetchFeedback>> | null = null;
+      let feedbackError: string | null = null;
+      try {
+        feedback = await fetchFeedback();
+      } catch {
+        feedbackError = 'Reaction feedback unavailable; do not infer that notifications are unread.';
+      }
       return {
         ...v,
+        feedback,
+        feedbackError,
+        notificationFeedback: notificationFeedback(ledger, feedback?.feedback ?? []),
         decisions: ledger.db
           .query("SELECT value FROM meta WHERE key LIKE 'decision:%'")
           .all()

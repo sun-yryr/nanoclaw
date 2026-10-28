@@ -361,3 +361,44 @@ describe('bounded processing and email parsing', () => {
     expect(payload.text).not.toContain('danger');
   });
 });
+
+describe('reaction feedback', () => {
+  test('ratings do not acknowledge notifications; eyes can be revoked without completing items', async () => {
+    const { notificationFeedback } = await import('../../skills/secretary/feedback.ts');
+    const l = ledger();
+    l.putItem(item(), 0, '2026-10-22T00:00:00.000Z');
+    l.db
+      .query('INSERT INTO notifications VALUES (?,?,?,?,?,?)')
+      .run('review:slot', 'Report', 'confirmed', 'answer-1', 'session-1', '2026-10-22T00:00:00.000Z');
+    const reaction = (meaning: string, active = 1) => ({
+      message_id: 'answer-1',
+      user_id: 'discord:owner',
+      emoji: meaning,
+      meaning,
+      active,
+      updated_at: '2026-10-22T00:00:00.000Z',
+      body: 'Report',
+    });
+    const quality = notificationFeedback(l, [reaction('good_answer'), reaction('bad_answer')])[0];
+    expect(quality.seen).toBe(false);
+    expect(quality.acknowledged).toBe(false);
+    expect(quality.ratings).toHaveLength(2);
+    expect(notificationFeedback(l, [reaction('seen')])[0].seenBy).toEqual(['discord:owner']);
+    expect(notificationFeedback(l, [reaction('seen', 0)])).toEqual([]);
+    expect(l.items()[0].state).toBe('todo');
+    // Reading an earlier notification must not cancel or suppress a due deadline reminder.
+    const reminder = l.db.query("SELECT id,at FROM reminders WHERE status='pending' ORDER BY at LIMIT 1").get() as any;
+    const { io, sent, receipts } = fakeTransport();
+    const { hash } = await import('../../skills/secretary/ledger.ts');
+    receipts.set(`secretary-${hash(`reminder:${reminder.id}`)}`, 'confirmed');
+    await remind(l, reminder.id, io, reminder.at);
+    expect(sent).toHaveLength(1);
+  });
+  test('secretary context and runtime instructions stay wired to persistent feedback', () => {
+    const cli = readFileSync(new URL('../../skills/secretary/cli.ts', import.meta.url), 'utf8');
+    const instructions = readFileSync(new URL('../../skills/secretary/SKILL.md', import.meta.url), 'utf8');
+    expect(cli).toContain('await fetchFeedback()');
+    expect(cli).toContain('notificationFeedback(ledger');
+    expect(instructions).toContain('Never cancel deadline reminders');
+  });
+});
